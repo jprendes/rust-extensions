@@ -26,8 +26,9 @@ use cgroups_rs::{
     cgroup::get_cgroups_relative_paths_by_pid, hierarchies, Cgroup, CgroupPid, MaxValue, Subsystem,
 };
 use containerd_shim_protos::{
-    cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, PidsStat, Throttle},
-    protobuf::{well_known_types::any::Any, Message},
+    cgroups::metrics::{CpuStat, CpuUsage, MemoryEntry, MemoryStat, Metrics, PidsStat, Throttle},
+    prost::Message as _,
+    prost_types::Any,
     shim::oci::Options,
 };
 use oci_spec::runtime::LinuxResources;
@@ -49,8 +50,7 @@ pub fn set_cgroup_and_oom_score(pid: u32) -> Result<()> {
         .map_err(io_error!(e, "read stdin"))?;
 
     if !data.is_empty() {
-        let opts =
-            Any::parse_from_bytes(&data).and_then(|any| Options::parse_from_bytes(&any.value))?;
+        let opts = Any::decode(data.as_slice())?.to_msg::<Options>()?;
 
         if !opts.shim_cgroup.is_empty() {
             add_task_to_cgroup(opts.shim_cgroup.as_str(), pid)?;
@@ -99,7 +99,7 @@ fn write_process_oom_score(pid: u32, score: i64) -> Result<()> {
 
 /// Collect process cgroup stats, return only necessary parts of it
 pub fn collect_metrics(pid: u32) -> Result<Metrics> {
-    let mut metrics = Metrics::new();
+    let mut metrics = Metrics::default();
 
     let cgroup = get_cgroup(pid)?;
 
@@ -107,8 +107,8 @@ pub fn collect_metrics(pid: u32) -> Result<Metrics> {
     for sub_system in Cgroup::subsystems(&cgroup) {
         match sub_system {
             Subsystem::Cpu(cpu_ctr) => {
-                let mut cpu_usage = CPUUsage::new();
-                let mut throttle = Throttle::new();
+                let mut cpu_usage = CpuUsage::default();
+                let mut throttle = Throttle::default();
                 let stat = cpu_ctr.cpu().stat;
                 for line in stat.lines() {
                     let parts = line.split(' ').collect::<Vec<&str>>();
@@ -119,58 +119,62 @@ pub fn collect_metrics(pid: u32) -> Result<Metrics> {
                     // https://github.com/opencontainers/runc/blob/dbe8434359ca35af1c1e10df42b1f4391c1e1010/libcontainer/cgroups/fs2/cpu.go#L70
                     match parts[0] {
                         "usage_usec" => {
-                            cpu_usage.set_total(parts[1].parse::<u64>().unwrap());
+                            cpu_usage.total = parts[1].parse::<u64>().unwrap();
                         }
                         "user_usec" => {
-                            cpu_usage.set_user(parts[1].parse::<u64>().unwrap());
+                            cpu_usage.user = parts[1].parse::<u64>().unwrap();
                         }
                         "system_usec" => {
-                            cpu_usage.set_kernel(parts[1].parse::<u64>().unwrap());
+                            cpu_usage.kernel = parts[1].parse::<u64>().unwrap();
                         }
                         "nr_periods" => {
-                            throttle.set_periods(parts[1].parse::<u64>().unwrap());
+                            throttle.periods = parts[1].parse::<u64>().unwrap();
                         }
                         "nr_throttled" => {
-                            throttle.set_throttled_periods(parts[1].parse::<u64>().unwrap());
+                            throttle.throttled_periods = parts[1].parse::<u64>().unwrap();
                         }
                         "throttled_usec" => {
-                            throttle.set_throttled_time(parts[1].parse::<u64>().unwrap());
+                            throttle.throttled_time = parts[1].parse::<u64>().unwrap();
                         }
                         _ => {}
                     }
                 }
-                let mut cpu_stats = CPUStat::new();
-                cpu_stats.set_throttling(throttle);
-                cpu_stats.set_usage(cpu_usage);
-                metrics.set_cpu(cpu_stats);
+                metrics.cpu = CpuStat {
+                    throttling: throttle.into(),
+                    usage: cpu_usage.into(),
+                }
+                .into();
             }
             Subsystem::Mem(mem_ctr) => {
                 let mem = mem_ctr.memory_stat();
-                let mut mem_entry = MemoryEntry::new();
-                mem_entry.set_usage(mem.usage_in_bytes);
-                let mut mem_stat = MemoryStat::new();
-                mem_stat.set_usage(mem_entry);
-                mem_stat.set_total_inactive_file(mem.stat.total_inactive_file);
-                metrics.set_memory(mem_stat);
+                metrics.memory = MemoryStat {
+                    usage: MemoryEntry {
+                        usage: mem.usage_in_bytes,
+                        ..Default::default()
+                    }
+                    .into(),
+                    total_inactive_file: mem.stat.total_inactive_file,
+                    ..Default::default()
+                }
+                .into();
             }
             Subsystem::Pid(pid_ctr) => {
-                let mut pid_stats = PidsStat::new();
-                pid_stats.set_current(
-                    pid_ctr
+                metrics.pids = PidsStat {
+                    current: pid_ctr
                         .get_pid_current()
-                        .map_err(other_error!(e, "get current pid"))?,
-                );
-                pid_stats.set_limit(
-                    pid_ctr
+                        .map_err(other_error!(e, "get current pid"))?
+                        .into(),
+                    limit: pid_ctr
                         .get_pid_max()
                         .map(|val| match val {
                             // See https://github.com/opencontainers/runc/blob/dbe8434359ca35af1c1e10df42b1f4391c1e1010/libcontainer/cgroups/fs/pids.go#L55
                             cgroups_rs::MaxValue::Max => 0,
                             cgroups_rs::MaxValue::Value(val) => val as u64,
                         })
-                        .map_err(other_error!(e, "get pid limit"))?,
-                );
-                metrics.set_pids(pid_stats)
+                        .map_err(other_error!(e, "get pid limit"))?
+                        .into(),
+                }
+                .into();
             }
             _ => {}
         }

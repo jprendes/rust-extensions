@@ -13,25 +13,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use containerd_shim_protos::{api::CreateTaskRequest, TaskClient};
-use ttrpc::{
-    context::{self, Context},
-    Client,
-};
+use containerd_shim_protos::api::CreateTaskRequest;
+use containerd_shim_protos::Task as _;
+use trapeze::Client;
 
-fn main() {
-    let c = Client::connect("unix:///tmp/shim-proto-ttrpc-001").unwrap();
-    let task = TaskClient::new(c);
+#[tokio::main]
+async fn main() {
+    let c = Client::connect("unix:///tmp/shim-proto-ttrpc-001")
+        .await
+        .unwrap();
+    let c = c.with_metadata([
+        ("key-1", "value-1-1"),
+        ("key-1", "value-1-2"),
+        ("key-2", "value-2"),
+    ]);
+
     let now = std::time::Instant::now();
 
-    let mut req = CreateTaskRequest::new();
-    req.set_id("id1".to_owned());
+    let req = CreateTaskRequest {
+        id: "id1".into(),
+        ..Default::default()
+    };
     println!(
         "OS Thread {:?} - task.create() started: {:?}",
         std::thread::current().id(),
         now.elapsed(),
     );
-    let resp = task.create(default_ctx(), &req).unwrap();
+    let resp = c.create(req).await.unwrap();
     assert_eq!(resp.pid, 0x10c0);
     println!(
         "OS Thread {:?} - task.create() -> {:?} ended: {:?}",
@@ -39,13 +47,4 @@ fn main() {
         resp,
         now.elapsed(),
     );
-}
-
-fn default_ctx() -> Context {
-    let mut ctx = context::with_timeout(0);
-    ctx.add("key-1".to_string(), "value-1-1".to_string());
-    ctx.add("key-1".to_string(), "value-1-2".to_string());
-    ctx.set("key-2".to_string(), vec!["value-2".to_string()]);
-
-    ctx
 }

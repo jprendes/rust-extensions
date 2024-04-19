@@ -15,38 +15,9 @@
 */
 use std::env;
 
-use containerd_shim::{publisher::RemotePublisher, Context};
-use containerd_shim_protos::events::task::TaskOOM;
+use containerd_shim::publisher::RemotePublisher;
+use containerd_shim_protos::{events::TaskOom, prost_types::Any};
 
-#[cfg(not(feature = "async"))]
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    // Must not start with unix://
-    let address = args
-        .get(1)
-        .ok_or("First argument must be containerd's TTRPC address to publish events")
-        .unwrap();
-
-    println!("Connecting: {}", &address);
-
-    let publisher = RemotePublisher::new(address).expect("Connect failed");
-
-    let mut event = TaskOOM::new();
-    event.set_container_id("123".into());
-
-    let ctx = Context::default();
-
-    println!("Sending event");
-
-    publisher
-        .publish(ctx, "/tasks/oom", "default", Box::new(event))
-        .expect("Publish failed");
-
-    println!("Done");
-}
-
-#[cfg(feature = "async")]
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
@@ -61,15 +32,14 @@ async fn main() {
 
     let publisher = RemotePublisher::new(address).await.expect("Connect failed");
 
-    let mut event = TaskOOM::new();
-    event.set_container_id("123".into());
-
-    let ctx = Context::default();
+    let event = TaskOom {
+        container_id: "123".into()
+    };
 
     println!("Sending event");
 
     publisher
-        .publish(ctx, "/tasks/oom", "default", Box::new(event))
+        .publish("/tasks/oom", "default", Any::from_msg(&event).unwrap())
         .await
         .expect("Publish failed");
 

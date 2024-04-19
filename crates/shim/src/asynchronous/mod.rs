@@ -17,23 +17,19 @@
 use std::{
     convert::TryFrom,
     env,
-    os::unix::{fs::FileTypeExt, net::UnixListener},
-    path::Path,
-    process,
-    process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    os::{
+        fd::FromRawFd,
+        unix::{fs::FileTypeExt, net::UnixListener},
     },
+    path::Path,
+    process::{self, Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use async_trait::async_trait;
 use command_fds::{CommandFdExt, FdMapping};
 use containerd_shim_protos::{
-    api::DeleteResponse,
-    protobuf::Message,
-    shim_async::{create_task, Client, Task},
-    ttrpc::r#async::Server,
+    api::DeleteResponse, prost::Message as _, shim::Task, trapeze::{service, Client, Server}, Events,
 };
 use futures::StreamExt;
 use libc::{SIGCHLD, SIGINT, SIGPIPE, SIGTERM};
@@ -156,7 +152,7 @@ where
                 handle_signals(signals).await;
             });
             let response = shim.delete_shim().await?;
-            let resp_bytes = response.write_to_bytes()?;
+            let resp_bytes = response.encode_to_vec();
             tokio::io::stdout()
                 .write_all(resp_bytes.as_slice())
                 .await
@@ -174,13 +170,24 @@ where
                 )?;
             }
 
+            #[cfg(unix)]
+            let ttrpc_address = format!("unix://{ttrpc_address}");
             let publisher = RemotePublisher::new(&ttrpc_address).await?;
             let task = shim.create_task_service(publisher).await;
-            let task_service = create_task(Arc::new(Box::new(task)));
-            let mut server = Server::new().register_service(task_service);
-            server = server.add_listener(SOCKET_FD)?;
-            server = server.set_domain_unix();
-            server.start().await?;
+
+            let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(SOCKET_FD) };
+            listener
+                .set_nonblocking(true)
+                .map_err(io_error!(err, "setting listener as non-blocking"))?;
+            let mut listener = tokio::net::UnixListener::from_std(listener)
+                .map_err(io_error!(err, "Creating ttrpc listener"))?;
+
+            let handle = tokio::spawn(async move {
+                Server::new()
+                    .register(service!(task : Task))
+                    .start(&mut listener)
+                    .await
+            });
 
             info!("Shim successfully started, waiting for exit signal...");
             tokio::spawn(async move {
@@ -189,7 +196,11 @@ where
             shim.wait().await;
 
             info!("Shutting down shim instance");
-            server.shutdown().await.unwrap_or_default();
+            handle.abort();
+            handle
+                .await
+                .unwrap_or(Ok(()))
+                .map_err(io_error!(err, "shutting down server"))?;
 
             // NOTE: If the shim server is down(like oom killer), the address
             // socket might be leaking.
@@ -393,7 +404,7 @@ async fn start_listener(address: &str) -> Result<UnixListener> {
 
 async fn wait_socket_working(address: &str, interval_in_ms: u64, count: u32) -> Result<()> {
     for _i in 0..count {
-        match Client::connect(address) {
+        match Client::connect(address).await {
             Ok(_) => {
                 return Ok(());
             }

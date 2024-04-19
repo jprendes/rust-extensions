@@ -13,79 +13,69 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 */
-#[cfg(not(feature = "async"))]
-use containerd_shim as shim;
 
-#[cfg(not(feature = "async"))]
-mod skeleton {
-    use std::sync::Arc;
+use std::sync::Arc;
 
-    use containerd_shim as shim;
-    use log::info;
-    use shim::{
-        api, synchronous::publisher::RemotePublisher, Config, DeleteResponse, ExitSignal, Flags,
-        TtrpcContext, TtrpcResult,
-    };
+use async_trait::async_trait;
+use containerd_shim::{
+    asynchronous::{run, spawn, ExitSignal, Shim},
+    publisher::RemotePublisher,
+    Config, Error, Flags, StartOpts, TtrpcResult,
+};
+use containerd_shim_protos::{api, api::DeleteResponse, shim::Task};
+use log::info;
 
-    #[derive(Clone)]
-    pub(crate) struct Service {
-        exit: Arc<ExitSignal>,
-    }
+#[derive(Clone)]
+struct Service {
+    exit: Arc<ExitSignal>,
+}
 
-    impl shim::Shim for Service {
-        type T = Service;
+#[async_trait]
+impl Shim for Service {
+    type T = Service;
 
-        fn new(_runtime_id: &str, _args: &Flags, _config: &mut Config) -> Self {
-            Service {
-                exit: Arc::new(ExitSignal::default()),
-            }
-        }
-
-        fn start_shim(&mut self, opts: shim::StartOpts) -> Result<String, shim::Error> {
-            let grouping = opts.id.clone();
-            let (_child_id, address) = shim::spawn(opts, &grouping, Vec::new())?;
-            Ok(address)
-        }
-
-        fn delete_shim(&mut self) -> Result<DeleteResponse, shim::Error> {
-            Ok(DeleteResponse::new())
-        }
-
-        fn wait(&mut self) {
-            self.exit.wait();
-        }
-
-        fn create_task_service(&self, _publisher: RemotePublisher) -> Self::T {
-            self.clone()
+    async fn new(_runtime_id: &str, _args: &Flags, _config: &mut Config) -> Self {
+        Service {
+            exit: Arc::new(ExitSignal::default()),
         }
     }
 
-    impl shim::Task for Service {
-        fn connect(
-            &self,
-            _ctx: &TtrpcContext,
-            _req: api::ConnectRequest,
-        ) -> TtrpcResult<api::ConnectResponse> {
-            info!("Connect request");
-            Ok(api::ConnectResponse {
-                version: String::from("example"),
-                ..Default::default()
-            })
-        }
+    async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
+        let grouping = opts.id.clone();
+        let address = spawn(opts, &grouping, Vec::new()).await?;
+        Ok(address)
+    }
 
-        fn shutdown(
-            &self,
-            _ctx: &TtrpcContext,
-            _req: api::ShutdownRequest,
-        ) -> TtrpcResult<api::Empty> {
-            info!("Shutdown request");
-            self.exit.signal();
-            Ok(api::Empty::default())
-        }
+    async fn delete_shim(&mut self) -> Result<DeleteResponse, Error> {
+        Ok(DeleteResponse::default())
+    }
+
+    async fn wait(&mut self) {
+        self.exit.wait().await;
+    }
+
+    async fn create_task_service(&self, _publisher: RemotePublisher) -> Self::T {
+        self.clone()
     }
 }
 
-fn main() {
-    #[cfg(not(feature = "async"))]
-    shim::run::<skeleton::Service>("io.containerd.empty.v1", None)
+impl Task for Service {
+    async fn connect(&self, _req: api::ConnectRequest) -> TtrpcResult<api::ConnectResponse> {
+        info!("Connect request");
+        Ok(api::ConnectResponse {
+            version: String::from("example"),
+            ..Default::default()
+        })
+    }
+
+    async fn shutdown(&self, _req: api::ShutdownRequest) -> TtrpcResult<()> {
+        info!("Shutdown request");
+        self.exit.signal();
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    run::<Service>("io.containerd.empty.v1", None).await;
 }

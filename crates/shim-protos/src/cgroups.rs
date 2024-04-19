@@ -15,9 +15,6 @@
 */
 
 pub mod metrics {
-    include!(concat!(env!("OUT_DIR"), "/cgroups/metrics.rs"));
+    pub use crate::private::io::containerd::cgroups::v1::*;
 }
 
-mod gogo {
-    pub use crate::types::gogo::*;
-}

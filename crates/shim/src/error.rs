@@ -18,7 +18,7 @@ use thiserror::Error;
 
 use crate::{
     monitor::ExitEvent,
-    protos::{protobuf, ttrpc},
+    protos::{prost, trapeze},
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,10 +31,10 @@ pub enum Error {
 
     /// TTRPC specific error.
     #[error("TTRPC error: {0}")]
-    Ttrpc(#[from] ttrpc::Error),
+    Ttrpc(#[from] trapeze::Status),
 
     #[error("Protobuf error: {0}")]
-    Protobuf(#[from] protobuf::Error),
+    Protobuf(#[from] prost::DecodeError),
 
     #[error("{context} error: {err}")]
     IoError {
@@ -91,20 +91,30 @@ pub enum Error {
     Unimplemented(String),
 }
 
-impl From<Error> for ttrpc::Error {
+impl From<Error> for trapeze::Status {
     fn from(e: Error) -> Self {
         match e {
-            Error::InvalidArgument(ref s) => {
-                ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::INVALID_ARGUMENT, s))
-            }
-            Error::NotFoundError(ref s) => {
-                ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::NOT_FOUND, s))
-            }
-            Error::FailedPreconditionError(ref s) => {
-                ttrpc::Error::RpcStatus(ttrpc::get_status(ttrpc::Code::FAILED_PRECONDITION, s))
-            }
-            Error::Ttrpc(e) => e,
-            _ => ttrpc::Error::Others(e.to_string()),
+            Error::InvalidArgument(message) => trapeze::Status {
+                code: trapeze::Code::InvalidArgument as i32,
+                message,
+                details: vec![],
+            },
+            Error::NotFoundError(message) => trapeze::Status {
+                code: trapeze::Code::NotFound as i32,
+                message,
+                details: vec![],
+            },
+            Error::FailedPreconditionError(message) => trapeze::Status {
+                code: trapeze::Code::FailedPrecondition as i32,
+                message,
+                details: vec![],
+            },
+            Error::Ttrpc(status) => status,
+            message => trapeze::Status {
+                code: trapeze::Code::Unknown as i32,
+                message: message.to_string(),
+                details: vec![],
+            },
         }
     }
 }
@@ -112,7 +122,7 @@ impl From<Error> for ttrpc::Error {
 #[macro_export]
 macro_rules! io_error {
     ($e:ident, $($args:tt)+) => {
-        |$e| Error::IoError {
+        |$e| $crate::error::Error::IoError {
             context: format_args!($($args)+).to_string(),
             err: $e,
         }

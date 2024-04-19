@@ -1,6 +1,6 @@
-use containerd_shim_protos::{events::task::*, protobuf::MessageDyn};
+use containerd_shim_protos::{events::*, prost::Name};
 
-pub trait Event: MessageDyn {
+pub trait Event: Name {
     fn topic(&self) -> String;
 }
 
@@ -52,7 +52,7 @@ impl Event for TaskDelete {
     }
 }
 
-impl Event for TaskOOM {
+impl Event for TaskOom {
     fn topic(&self) -> String {
         "/tasks/oom".to_string()
     }

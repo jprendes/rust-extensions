@@ -31,8 +31,6 @@ use nix::mount::{mount, MsFlags};
 use nix::unistd::{fork, ForkResult};
 
 use crate::error::{Error, Result};
-#[cfg(not(feature = "async"))]
-use crate::monitor::{monitor_subscribe, wait_pid, Topic};
 
 #[cfg(target_os = "linux")]
 struct Flag {
@@ -406,122 +404,6 @@ impl From<MountExitCode> for Result<()> {
     }
 }
 
-#[cfg(not(feature = "async"))]
-#[cfg(target_os = "linux")]
-pub fn mount_rootfs(
-    fs_type: Option<&str>,
-    source: Option<&str>,
-    options: &[String],
-    target: impl AsRef<Path>,
-) -> Result<()> {
-    //TODO add helper to mount fuse
-    let max_size = page_size::get();
-    // avoid hitting one page limit of mount argument buffer
-    //
-    // NOTE: 512 id a buffer during pagesize check.
-    let (chdir, options) =
-        if fs_type.unwrap_or("") == "overlay" && options_size(options) >= max_size - 512 {
-            LowerdirCompactor::new(options).compact()
-        } else {
-            (None, options.to_vec())
-        };
-
-    let mut flags: MsFlags = MsFlags::from_bits(0).unwrap();
-    let mut data = Vec::new();
-    options.iter().for_each(|x| {
-        if let Some(f) = MOUNT_FLAGS.get(x.as_str()) {
-            if f.clear {
-                flags.bitand_assign(f.flags.not());
-            } else {
-                flags.bitor_assign(f.flags)
-            }
-        } else {
-            data.push(x.as_str())
-        }
-    });
-
-    let opt = data.join(",");
-    if opt.len() > max_size {
-        return Err(other!("mount option is too long"));
-    }
-
-    let data = if !data.is_empty() {
-        Some(opt.as_str())
-    } else {
-        None
-    };
-
-    let s = monitor_subscribe(Topic::All)?;
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child, .. }) => {
-            let code: MountExitCode = wait_pid(i32::from(child), s).into();
-            code.into()
-        }
-        Ok(ForkResult::Child) => {
-            if let Some(workdir) = chdir {
-                env::set_current_dir(Path::new(&workdir)).unwrap_or_else(|_| {
-                    unsafe { libc::_exit(i32::from(MountExitCode::ChdirErr)) };
-                });
-            }
-            // mount with non-propagation first, or remount with changed data
-            let oflags = flags.bitand(PROPAGATION_TYPES.not());
-            let zero: MsFlags = MsFlags::from_bits(0).unwrap();
-            if flags.bitand(MsFlags::MS_REMOUNT).eq(&zero) || data.is_some() {
-                mount(source, target.as_ref(), fs_type, oflags, data).unwrap_or_else(|err| {
-                    error!(
-                        "Mount {:?} to {} failed: {}",
-                        source,
-                        target.as_ref().display(),
-                        err
-                    );
-                    let code: MountExitCode = err.into();
-                    unsafe { libc::_exit(code.into()) };
-                });
-            }
-            // change the propagation type
-            if flags.bitand(*PROPAGATION_TYPES).ne(&zero) {
-                mount::<str, Path, str, str>(
-                    None,
-                    target.as_ref(),
-                    None,
-                    flags.bitand(*MS_PROPAGATION),
-                    None,
-                )
-                .unwrap_or_else(|err| {
-                    error!(
-                        "Change {} mount propagation faied: {}",
-                        target.as_ref().display(),
-                        err
-                    );
-                    let code: MountExitCode = err.into();
-                    unsafe { libc::_exit(code.into()) };
-                });
-            }
-            if oflags.bitand(*MS_BIND_RO).eq(&MS_BIND_RO) {
-                mount::<str, Path, str, str>(
-                    None,
-                    target.as_ref(),
-                    None,
-                    oflags.bitor(MsFlags::MS_REMOUNT),
-                    None,
-                )
-                .unwrap_or_else(|err| {
-                    error!(
-                        "Change {} read-only failed: {}",
-                        target.as_ref().display(),
-                        err
-                    );
-                    let code: MountExitCode = err.into();
-                    unsafe { libc::_exit(code.into()) };
-                });
-            }
-            unsafe { libc::_exit(i32::from(MountExitCode::Success)) };
-        }
-        Err(_) => Err(other!("fork mount process failed")),
-    }
-}
-
-#[cfg(feature = "async")]
 #[cfg(target_os = "linux")]
 pub fn mount_rootfs(
     fs_type: Option<&str>,

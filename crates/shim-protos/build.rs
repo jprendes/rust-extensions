@@ -14,155 +14,40 @@
    limitations under the License.
 */
 
-use std::{
-    env, fs,
-    fs::File,
-    io::{BufRead, BufReader},
-    path::PathBuf,
-};
-
-use ttrpc_codegen::{Codegen, Customize, ProtobufCustomize};
+use trapeze_codegen::Config;
 
 fn main() {
-    genmodule(
-        "types",
-        &[
-            "vendor/gogoproto/gogo.proto",
-            "vendor/google/protobuf/empty.proto",
-            "vendor/github.com/containerd/containerd/protobuf/plugin/fieldpath.proto",
-            "vendor/github.com/containerd/containerd/api/types/mount.proto",
-            "vendor/github.com/containerd/containerd/api/types/task/task.proto",
-            #[cfg(feature = "sandbox")]
-            "vendor/github.com/containerd/containerd/api/types/platform.proto",
-        ],
-        false,
-    );
-
-    genmodule(
-        "cgroups",
-        &["vendor/github.com/containerd/cgroups/stats/v1/metrics.proto"],
-        false,
-    );
-
-    genmodule(
-        "stats",
-        &["vendor/microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/stats/stats.proto"],
-        false,
-    );
-
-    genmodule(
-        "events",
-        &[
-            "vendor/github.com/containerd/containerd/api/types/mount.proto",
-            "vendor/github.com/containerd/containerd/api/events/container.proto",
-            "vendor/github.com/containerd/containerd/api/events/content.proto",
-            "vendor/github.com/containerd/containerd/api/events/image.proto",
-            "vendor/github.com/containerd/containerd/api/events/namespace.proto",
-            "vendor/github.com/containerd/containerd/api/events/sandbox.proto",
-            "vendor/github.com/containerd/containerd/api/events/snapshot.proto",
-            "vendor/github.com/containerd/containerd/api/events/task.proto",
-        ],
-        false,
-    );
-
-    genmodule(
-        "shim",
-        &[
-            "vendor/github.com/containerd/containerd/runtime/v2/runc/options/oci.proto",
-            "vendor/github.com/containerd/containerd/api/runtime/task/v2/shim.proto",
-            "vendor/github.com/containerd/containerd/api/services/ttrpc/events/v1/events.proto",
-        ],
-        false,
-    );
-
-    #[cfg(feature = "async")]
-    {
-        genmodule(
-            "shim_async",
+    Config::new()
+        .enable_type_names()
+        .include_file("mod.rs")
+        .compile_protos(
             &[
+                "vendor/gogoproto/gogo.proto",
+                "vendor/github.com/containerd/containerd/protobuf/plugin/fieldpath.proto",
+                "vendor/github.com/containerd/containerd/api/types/mount.proto",
+                "vendor/github.com/containerd/containerd/api/types/task/task.proto",
+                "vendor/github.com/containerd/cgroups/stats/v1/metrics.proto",
+                "vendor/microsoft/hcsshim/cmd/containerd-shim-runhcs-v1/stats/stats.proto",
+                "vendor/github.com/containerd/containerd/api/events/container.proto",
+                "vendor/github.com/containerd/containerd/api/events/content.proto",
+                "vendor/github.com/containerd/containerd/api/events/image.proto",
+                "vendor/github.com/containerd/containerd/api/events/namespace.proto",
+                "vendor/github.com/containerd/containerd/api/events/sandbox.proto",
+                "vendor/github.com/containerd/containerd/api/events/snapshot.proto",
+                "vendor/github.com/containerd/containerd/api/events/task.proto",
+                "vendor/github.com/containerd/containerd/runtime/v2/runc/options/oci.proto",
                 "vendor/github.com/containerd/containerd/api/runtime/task/v2/shim.proto",
                 "vendor/github.com/containerd/containerd/api/services/ttrpc/events/v1/events.proto",
+                #[cfg(feature = "sandbox")]
+                "vendor/github.com/containerd/containerd/api/types/platform.proto",
+                #[cfg(feature = "sandbox")]
+                "vendor/github.com/containerd/containerd/api/runtime/sandbox/v1/sandbox.proto",
             ],
-            true,
-        );
-    }
-
-    #[cfg(feature = "sandbox")]
-    {
-        genmodule(
-            "sandbox",
-            &["vendor/github.com/containerd/containerd/api/runtime/sandbox/v1/sandbox.proto"],
-            false,
-        );
-
-        #[cfg(feature = "async")]
-        genmodule(
-            "sandbox_async",
-            &["vendor/github.com/containerd/containerd/api/runtime/sandbox/v1/sandbox.proto"],
-            true,
-        );
-    }
-}
-
-fn genmodule(name: &str, inputs: &[&str], async_all: bool) {
-    let mut out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
-    out_path.push(name);
-
-    fs::create_dir_all(&out_path).unwrap();
-
-    Codegen::new()
-        .inputs(inputs)
-        .include("vendor/")
-        .rust_protobuf()
-        .rust_protobuf_customize(
-            ProtobufCustomize::default()
-                .gen_mod_rs(true)
-                .generate_accessors(true),
+            &["vendor/"],
         )
-        .customize(Customize {
-            async_all,
-            ..Default::default()
-        })
-        .out_dir(&out_path)
-        .run()
         .expect("Failed to generate protos");
-
-    // Find all *.rs files generated by TTRPC codegen
-    let files = fs::read_dir(&out_path)
-        .unwrap()
-        .filter_map(|entry| {
-            let entry = entry.unwrap();
-            if !entry.file_type().unwrap().is_file() {
-                None
-            } else {
-                Some(entry.path())
-            }
-        })
-        .collect::<Vec<_>>();
-
-    // `include!` doesn't handle files with attributes:
-    // - https://github.com/rust-lang/rust/issues/18810
-    // - https://github.com/rust-lang/rfcs/issues/752
-    // Remove all lines that start with:
-    // - #![allow(unknown_lints)]
-    // - #![cfg_attr(rustfmt, rustfmt::skip)]
-    //
-    for path in files {
-        let file = File::open(&path).unwrap();
-
-        let joined = BufReader::new(file)
-            .lines()
-            .filter_map(|line| {
-                let line = line.unwrap();
-                if line.starts_with("#!") || line.starts_with("//!") {
-                    None
-                } else {
-                    Some(line)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\r\n");
-
-        fs::write(&path, joined).unwrap();
-    }
 }
+
+/*
+
+*/

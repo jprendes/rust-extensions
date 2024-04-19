@@ -14,6 +14,9 @@
    limitations under the License.
 */
 
+//include!(concat!(env!("OUT_DIR"), "/stats/mod.rs"));
+
+/*
 pub mod stats {
     include!(concat!(env!("OUT_DIR"), "/stats/stats.rs"));
 }
@@ -21,3 +24,4 @@ pub mod stats {
 pub mod metrics {
     pub use crate::cgroups::metrics::{file_descriptor, Metrics};
 }
+*/

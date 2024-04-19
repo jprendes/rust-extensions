@@ -15,10 +15,7 @@
 */
 use std::fmt;
 
-#[cfg(feature = "async")]
 pub use crate::asynchronous::monitor::*;
-#[cfg(not(feature = "async"))]
-pub use crate::synchronous::monitor::*;
 
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub enum Topic {

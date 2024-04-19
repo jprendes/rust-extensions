@@ -15,18 +15,10 @@ repository.workspace = true
 homepage.workspace = true
 
 [features]
-async = [
-  "async-trait",
-  "containerd-shim-protos/async",
-  "futures",
-  "signal-hook-tokio",
-  "tokio",
-]
 docs = []
 
 [[example]]
-name = "skeleton_async"
-required-features = ["async"]
+name = "skeleton"
 
 [[example]]
 name = "windows-log-reader"
@@ -53,14 +45,13 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
+trapeze = "0.5.1"
 
 # Async dependencies
-async-trait = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
-signal-hook-tokio = { version = "0.3.1", optional = true, features = [
-  "futures-v0_3",
-] }
-tokio = { workspace = true, features = ["full"], optional = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
+tokio = { workspace = true, features = ["full"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cgroups-rs = "0.3.4"

@@ -25,7 +25,7 @@ use containerd_shim::{
     protos::{
         api::{ProcessInfo, StateResponse, Status},
         cgroups::metrics::Metrics,
-        protobuf::well_known_types::timestamp::Timestamp,
+        prost_types::Timestamp,
     },
     util::asyncify,
     Console, Result,
@@ -83,7 +83,7 @@ pub struct ProcessTemplate<S> {
 impl<S> ProcessTemplate<S> {
     pub fn new(id: &str, stdio: Stdio, lifecycle: S) -> Self {
         Self {
-            state: Status::CREATED,
+            state: Status::Created,
             id: id.to_string(),
             stdio,
             pid: 0,
@@ -108,7 +108,7 @@ where
     }
 
     async fn set_exited(&mut self, exit_code: i32) {
-        self.state = Status::STOPPED;
+        self.state = Status::Stopped;
         self.exit_code = exit_code;
         self.exited_at = Some(OffsetDateTime::now_utc());
         // set wait_chan_tx to empty, to trigger the drop of the initialized Receiver.
@@ -120,21 +120,21 @@ where
     }
 
     async fn state(&self) -> Result<StateResponse> {
-        let mut resp = StateResponse::new();
-        resp.id = self.id.to_string();
-        resp.set_status(self.state);
-        resp.pid = self.pid as u32;
-        resp.terminal = self.stdio.terminal;
-        resp.stdin = self.stdio.stdin.to_string();
-        resp.stdout = self.stdio.stdout.to_string();
-        resp.stderr = self.stdio.stderr.to_string();
-        resp.exit_status = self.exit_code as u32;
-        if let Some(exit_at) = self.exited_at {
-            let mut time_stamp = Timestamp::new();
-            time_stamp.seconds = exit_at.unix_timestamp();
-            time_stamp.nanos = exit_at.nanosecond() as i32;
-            resp.exited_at = Some(time_stamp).into();
-        }
+        let resp = StateResponse {
+            id: self.id.clone(),
+            status: self.state.into(),
+            pid: self.pid as u32,
+            terminal: self.stdio.terminal,
+            stdin: self.stdio.stdin.clone(),
+            stdout: self.stdio.stdout.clone(),
+            stderr: self.stdio.stderr.clone(),
+            exit_status: self.exit_code as u32,
+            exited_at: self.exited_at.map(|exit_at| Timestamp {
+                seconds: exit_at.unix_timestamp(),
+                nanos: exit_at.nanosecond() as i32,
+            }),
+            ..Default::default()
+        };
         Ok(resp)
     }
 
@@ -148,7 +148,7 @@ where
 
     async fn wait_channel(&mut self) -> Result<Receiver<()>> {
         let (tx, rx) = channel::<()>();
-        if self.state != Status::STOPPED {
+        if self.state != Status::Stopped {
             self.wait_chan_tx.push(tx);
         }
         Ok(rx)

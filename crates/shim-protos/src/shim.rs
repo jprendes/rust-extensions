@@ -15,26 +15,25 @@
 */
 
 pub mod oci {
-    include!(concat!(env!("OUT_DIR"), "/shim/oci.rs"));
+    pub use crate::private::containerd::runc::v1::*;
 }
 
 pub mod events {
-    include!(concat!(env!("OUT_DIR"), "/shim/events.rs"));
+    pub use crate::private::containerd::services::events::ttrpc::v1::*;
 }
 
-pub mod events_ttrpc {
-    include!(concat!(env!("OUT_DIR"), "/shim/events_ttrpc.rs"));
-}
-
+/*
 #[cfg(feature = "async")]
 pub mod events_ttrpc_async {
     include!(concat!(env!("OUT_DIR"), "/shim_async/events_ttrpc.rs"));
 }
+*/
 
 pub mod shim {
-    include!(concat!(env!("OUT_DIR"), "/shim/shim.rs"));
+    pub use crate::private::containerd::task::v2::*;
 }
 
+/*
 pub mod shim_ttrpc {
     include!(concat!(env!("OUT_DIR"), "/shim/shim_ttrpc.rs"));
 }
@@ -68,3 +67,6 @@ mod gogo {
 pub use events_ttrpc::{create_events, Events, EventsClient};
 /// Shim task service.
 pub use shim_ttrpc::{create_task, Task, TaskClient};
+*/
+
+pub use shim::Task;

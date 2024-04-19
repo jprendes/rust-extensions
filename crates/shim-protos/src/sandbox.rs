@@ -14,6 +14,9 @@
    limitations under the License.
 */
 
+include!(concat!(env!("OUT_DIR"), "/sandbox/mod.rs"));
+
+/*
 pub mod sandbox {
     include!(concat!(env!("OUT_DIR"), "/sandbox/sandbox.rs"));
 }
@@ -34,3 +37,4 @@ pub(crate) mod mount {
 pub(crate) mod platform {
     pub use crate::types::platform::*;
 }
+*/

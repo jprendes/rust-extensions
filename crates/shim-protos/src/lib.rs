@@ -17,8 +17,13 @@
 #![cfg_attr(feature = "docs", doc = include_str!("../README.md"))]
 #![allow(warnings)]
 
-pub use protobuf;
-pub use ttrpc;
+mod private {
+    include!(concat!(env!("OUT_DIR"), "/mod.rs"));
+}
+
+pub use prost;
+pub use prost_types;
+pub use trapeze;
 
 pub mod cgroups;
 pub mod events;
@@ -31,32 +36,20 @@ pub mod windows;
 /// Includes event names shims can publish to containerd.
 pub mod topics;
 
-pub mod shim_sync {
-    /// TTRPC client reexport for easier access.
-    pub use ttrpc::Client;
+/// TTRPC client reexport for easier access.
+pub use trapeze::Client;
 
-    /// Shim events service.
-    pub use crate::shim::events_ttrpc::{create_events, Events, EventsClient};
-    /// Shim task service.
-    pub use crate::shim::shim_ttrpc::{create_task, Task, TaskClient};
-}
-
-pub use shim_sync::*;
-
-#[cfg(feature = "async")]
-pub mod shim_async {
-    /// TTRPC client reexport for easier access.
-    pub use ttrpc::asynchronous::Client;
-
-    /// Shim events service.
-    pub use crate::shim::events_ttrpc_async::{create_events, Events, EventsClient};
-    /// Shim task service.
-    pub use crate::shim::shim_ttrpc_async::{create_task, Task, TaskClient};
-}
+/// Shim events service.
+pub use crate::shim::events::Events;
+/// Shim task service.
+pub use crate::shim::shim::Task;
 
 /// Reexport auto-generated public data structures.
 pub mod api {
-    pub use crate::shim::{empty::*, events::*, mount::*, shim::*, task::*};
+    pub use crate::shim::{shim::*, events::*};
+    pub use crate::types::*;
+
+    //pub use crate::shim::{empty::*, events::*, mount::*, shim::*, task::*};
 }
 
 #[cfg(feature = "sandbox")]

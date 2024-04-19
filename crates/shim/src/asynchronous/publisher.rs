@@ -14,26 +14,17 @@
    limitations under the License.
 */
 
-use std::os::unix::io::RawFd;
-
-use async_trait::async_trait;
 use containerd_shim_protos::{
-    api::Empty,
-    protobuf::MessageDyn,
-    shim::events,
-    shim_async::{Client, Events, EventsClient},
-    ttrpc,
-    ttrpc::{context::Context, r#async::TtrpcContext},
+    prost_types::Any,
+    shim::events::{self, Events},
+    trapeze::{self, Client},
 };
 
-use crate::{
-    error::Result,
-    util::{asyncify, connect, convert_to_any, timestamp},
-};
+use crate::{error::Result, util::timestamp};
 
 /// Async Remote publisher connects to containerd's TTRPC endpoint to publish events from shim.
 pub struct RemotePublisher {
-    client: EventsClient,
+    client: Client,
 }
 
 impl RemotePublisher {
@@ -42,77 +33,47 @@ impl RemotePublisher {
     /// containerd uses `/run/containerd/containerd.sock.ttrpc` by default
     pub async fn new(address: impl AsRef<str>) -> Result<RemotePublisher> {
         let client = Self::connect(address).await?;
-
-        Ok(RemotePublisher {
-            client: EventsClient::new(client),
-        })
+        Ok(RemotePublisher { client })
     }
 
     async fn connect(address: impl AsRef<str>) -> Result<Client> {
-        let addr = address.as_ref().to_string();
-        let fd = asyncify(move || -> Result<RawFd> {
-            let fd = connect(addr)?;
-            Ok(fd)
-        })
-        .await?;
-
-        // Client::new() takes ownership of the RawFd.
-        Ok(Client::new(fd))
+        let address = address.as_ref();
+        Client::connect(address)
+            .await
+            .map_err(io_error!(err, "Connecting to {address}"))
     }
 
     /// Publish a new event.
     ///
     /// Event object can be anything that Protobuf able serialize (e.g. implement `Message` trait).
-    pub async fn publish(
-        &self,
-        ctx: Context,
-        topic: &str,
-        namespace: &str,
-        event: Box<dyn MessageDyn>,
-    ) -> Result<()> {
-        let mut envelope = events::Envelope::new();
-        envelope.set_topic(topic.to_owned());
-        envelope.set_namespace(namespace.to_owned());
-        envelope.set_timestamp(timestamp()?);
-        envelope.set_event(convert_to_any(event)?);
+    pub async fn publish(&self, topic: &str, namespace: &str, event: Any) -> Result<()> {
+        let req = events::ForwardRequest {
+            envelope: events::Envelope {
+                topic: topic.into(),
+                timestamp: timestamp()?.into(),
+                namespace: namespace.into(),
+                event: event.into(),
+            }
+            .into(),
+        };
 
-        let mut req = events::ForwardRequest::new();
-        req.set_envelope(envelope);
-
-        self.client.forward(ctx, &req).await?;
+        self.client.forward(req).await?;
 
         Ok(())
     }
 }
 
-#[async_trait]
 impl Events for RemotePublisher {
-    async fn forward(
-        &self,
-        _ctx: &TtrpcContext,
-        req: events::ForwardRequest,
-    ) -> ttrpc::Result<Empty> {
-        self.client.forward(Context::default(), &req).await
+    async fn forward(&self, req: events::ForwardRequest) -> trapeze::Result<()> {
+        self.client.forward(req).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        os::unix::{io::AsRawFd, net::UnixListener},
-        sync::Arc,
-    };
-
-    use containerd_shim_protos::{
-        api::{Empty, ForwardRequest},
-        events::task::TaskOOM,
-        shim_async::create_events,
-        ttrpc::asynchronous::Server,
-    };
-    use tokio::sync::{
-        mpsc::{channel, Sender},
-        Barrier,
-    };
+    use containerd_shim_protos::{api::ForwardRequest, events::TaskOom, trapeze::{service, ServerConnection}};
+    use tokio::sync::mpsc::{channel, Sender};
+    use trapeze::transport::Listener as _;
 
     use super::*;
 
@@ -120,64 +81,47 @@ mod tests {
         tx: Sender<i32>,
     }
 
-    #[async_trait]
     impl Events for FakeServer {
-        async fn forward(&self, _ctx: &TtrpcContext, req: ForwardRequest) -> ttrpc::Result<Empty> {
-            let env = req.envelope();
-            if env.topic() == "/tasks/oom" {
+        async fn forward(&self, req: ForwardRequest) -> trapeze::Result<()> {
+            let env = req.envelope.unwrap_or_default();
+            if env.topic == "/tasks/oom" {
                 self.tx.send(0).await.unwrap();
             } else {
                 self.tx.send(-1).await.unwrap();
             }
-            Ok(Empty::default())
+            Ok(())
         }
     }
 
     #[tokio::test]
     async fn test_connect() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let path = format!("{}/socket", tmpdir.as_ref().to_str().unwrap());
-        let path1 = path.clone();
+        let addr = format!("unix://{}/socket", tmpdir.as_ref().to_str().unwrap());
 
         assert!(RemotePublisher::connect("a".repeat(16384)).await.is_err());
-        assert!(RemotePublisher::connect(&path).await.is_err());
+        assert!(RemotePublisher::connect(&addr).await.is_err());
 
         let (tx, mut rx) = channel(1);
-        let server = FakeServer { tx };
-        let barrier = Arc::new(Barrier::new(2));
-        let barrier2 = barrier.clone();
-        let server_thread = tokio::spawn(async move {
-            let listener = UnixListener::bind(&path1).unwrap();
-            let t = Arc::new(Box::new(server) as Box<dyn Events + Send + Sync>);
-            let service = create_events(t);
-            let mut server = Server::new()
-                .set_domain_unix()
-                .add_listener(listener.as_raw_fd())
-                .unwrap()
-                .register_service(service);
-            std::mem::forget(listener);
-            server.start().await.unwrap();
-            barrier2.wait().await;
-
-            barrier2.wait().await;
-            server.shutdown().await.unwrap();
+        let mut listener = trapeze::transport::bind(&addr).await.unwrap();
+        tokio::spawn(async move {
+            let conn = listener.accept().await.unwrap();
+            ServerConnection::new(conn)
+                .register(service!(FakeServer { tx } : Events))
+                .start()
+                .await
         });
 
-        barrier.wait().await;
-        let client = RemotePublisher::new(&path).await.unwrap();
-        let mut msg = TaskOOM::new();
-        msg.set_container_id("test".to_string());
-        client
-            .publish(Context::default(), "/tasks/oom", "ns1", Box::new(msg))
-            .await
-            .unwrap();
+        let client = RemotePublisher::new(&addr).await.unwrap();
+        let msg = TaskOom {
+            container_id: "test".into(),
+        };
+        client.publish("/tasks/oom", "ns1", Any::from_msg(&msg).unwrap()).await.unwrap();
+
         match rx.recv().await {
             Some(0) => {}
             _ => {
                 panic!("the received event is not same as published")
             }
         }
-        barrier.wait().await;
-        server_thread.await.unwrap();
     }
 }

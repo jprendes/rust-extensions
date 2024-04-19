@@ -14,6 +14,9 @@
    limitations under the License.
 */
 
+pub use crate::private::containerd::events::*;
+
+/*
 pub mod container {
     include!(concat!(env!("OUT_DIR"), "/events/container.rs"));
 }
@@ -53,3 +56,4 @@ mod gogo {
 mod fieldpath {
     pub use crate::types::fieldpath::*;
 }
+*/

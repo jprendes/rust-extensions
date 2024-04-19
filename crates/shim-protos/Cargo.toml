@@ -16,7 +16,6 @@ homepage.workspace = true
 
 [features]
 default = []
-async = ["ttrpc/async", "async-trait"]
 sandbox = []
 docs = []
 
@@ -32,37 +31,20 @@ path = "examples/ttrpc-client.rs"
 name = "shim-proto-connect"
 path = "examples/connect.rs"
 
-[[example]]
-name = "shim-proto-server-async"
-path = "examples/ttrpc-server-async.rs"
-required-features = ["async"]
-
-[[example]]
-name = "shim-proto-client-async"
-path = "examples/ttrpc-client-async.rs"
-required-features = ["async"]
-
-[[example]]
-name = "shim-proto-connect-async"
-path = "examples/connect-async.rs"
-required-features = ["async"]
-
 [dependencies]
-async-trait = { version = "0.1.48", optional = true }
-protobuf = "3.1"
-ttrpc = "0.8"
+trapeze = "0.5.1"
+prost = "0.12"
+prost-types = "0.12"
 
 [build-dependencies]
-ttrpc-codegen = "0.4"
+trapeze-codegen = "0.5.1"
 
 [dev-dependencies]
-ctrlc = { version = "3.0", features = ["termination"] }
 log.workspace = true
 simple_logger = { version = "4.0", default-features = false, features = [
   "stderr",
 ] }
 tokio = { workspace = true, features = ["full"] }
-crossbeam = "0.8.0" # Used by create_ttrpc_context()
 
 [package.metadata.docs.rs]
 features = ["docs"]

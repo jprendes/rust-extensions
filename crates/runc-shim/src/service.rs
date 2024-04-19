@@ -27,11 +27,11 @@ use containerd_shim::{
     event::Event,
     io_error,
     monitor::{Subject, Topic},
-    protos::{events::task::TaskExit, protobuf::MessageDyn},
+    protos::{events::TaskExit, prost_types::Any},
     util::{
         convert_to_timestamp, read_options, read_runtime, read_spec, timestamp, write_str_to_file,
     },
-    Config, Context, DeleteResponse, Error, Flags, StartOpts,
+    Config, DeleteResponse, Flags, StartOpts,
 };
 use log::{debug, error, warn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -120,10 +120,12 @@ impl Shim for Service {
         runc.delete(&self.id, Some(&DeleteOpts { force: true }))
             .await
             .unwrap_or_else(|e| warn!("failed to remove runc container: {}", e));
-        let mut resp = DeleteResponse::new();
+        let resp = DeleteResponse {
+            exit_status: 137,
+            exited_at: timestamp()?.into(),
+            ..Default::default()
+        };
         // sigkill
-        resp.set_exit_status(137);
-        resp.set_exited_at(timestamp()?);
         Ok(resp)
     }
 
@@ -147,7 +149,7 @@ impl Shim for Service {
 async fn process_exits(
     s: Subscription,
     task: &TaskService<RuncFactory, RuncContainer>,
-    tx: Sender<(String, Box<dyn MessageDyn>)>,
+    tx: Sender<(String, Any)>,
 ) {
     let containers = task.containers.clone();
     let mut s = s;
@@ -185,7 +187,7 @@ async fn process_exits(
                             ..Default::default()
                         };
                         let topic = event.topic();
-                        tx.send((topic.to_string(), Box::new(event)))
+                        tx.send((topic.to_string(), Any::from_msg(&event).unwrap()))
                             .await
                             .unwrap_or_else(|e| warn!("send {} to publisher: {}", topic, e));
 
@@ -208,15 +210,11 @@ async fn process_exits(
     });
 }
 
-async fn forward(
-    publisher: RemotePublisher,
-    ns: String,
-    mut rx: Receiver<(String, Box<dyn MessageDyn>)>,
-) {
+async fn forward(publisher: RemotePublisher, ns: String, mut rx: Receiver<(String, Any)>) {
     tokio::spawn(async move {
         while let Some((topic, e)) = rx.recv().await {
             publisher
-                .publish(Context::default(), &topic, &ns, e)
+                .publish(&topic, &ns, e)
                 .await
                 .unwrap_or_else(|e| warn!("publish {} to containerd: {}", topic, e));
         }

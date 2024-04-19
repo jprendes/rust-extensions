@@ -16,11 +16,11 @@
 
 use std::env;
 
-use client::api;
+use client::{api, Task as _};
 use containerd_shim_protos as client;
-use ttrpc::context::Context;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
 
     let socket_path = args
@@ -31,11 +31,7 @@ fn main() {
     let pid = args.get(2).map(|str| str.to_owned()).unwrap_or_default();
 
     println!("Connecting to {}...", socket_path);
-    let client = client::Client::connect(socket_path).expect("Failed to connect to shim");
-
-    let task_client = client::TaskClient::new(client);
-
-    let context = Context::default();
+    let client = client::Client::connect(socket_path).await.expect("Failed to connect to shim");
 
     let req = api::ConnectRequest {
         id: pid,
@@ -43,8 +39,9 @@ fn main() {
     };
 
     println!("Sending `Connect` request...");
-    let resp = task_client
-        .connect(context.clone(), &req)
+    let resp = client
+        .connect(req)
+        .await
         .expect("Connect request failed");
     println!("Connect response: {:?}", resp);
 
@@ -55,8 +52,9 @@ fn main() {
     };
 
     println!("Sending `Shutdown` request...");
-    let resp = task_client
-        .shutdown(context, &req)
+    let resp = client
+        .shutdown(req)
+        .await
         .expect("Failed to send shutdown request");
 
     println!("Shutdown response: {:?}", resp)

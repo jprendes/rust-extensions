@@ -13,59 +13,23 @@
    See the License for the specific language governing permissions and
    limitations under the License.
 */
-#[cfg(windows)]
-use std::error::Error;
 
 #[cfg(windows)]
-fn main() -> Result<(), Box<dyn Error>> {
-    use std::{
-        env,
-        fs::OpenOptions,
-        os::windows::{
-            fs::OpenOptionsExt,
-            io::{FromRawHandle, IntoRawHandle},
-        },
-        time::Duration,
-    };
-
-    use mio::{windows::NamedPipe, Events, Interest, Poll, Token};
-    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
-
-    let args: Vec<String> = env::args().collect();
-
-    let address = args
-        .get(1)
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let address = std::env::args()
+        .nth(1)
         .ok_or("First argument must be shims address to read logs (\\\\.\\pipe\\containerd-shim-{ns}-{id}-log) ")
         .unwrap();
 
     println!("Reading logs from: {}", &address);
 
-    let mut opts = OpenOptions::new();
-    opts.read(true)
-        .write(true)
-        .custom_flags(FILE_FLAG_OVERLAPPED);
-    let file = opts.open(address).unwrap();
-    let mut client = unsafe { NamedPipe::from_raw_handle(file.into_raw_handle()) };
-
-    let mut stdio = std::io::stdout();
-    let mut poll = Poll::new().unwrap();
-    poll.registry()
-        .register(&mut client, Token(1), Interest::READABLE)
-        .unwrap();
-    let mut events = Events::with_capacity(128);
-    loop {
-        poll.poll(&mut events, Some(Duration::from_millis(10)))
-            .unwrap();
-        match std::io::copy(&mut client, &mut stdio) {
-            Ok(_) => break,
-            Err(_) => continue,
-        }
-    }
+    let mut client = tokio::net::windows::named_pipe::NamedPipeClient::connect(&address).await;
+    tokio::io::copy(&mut client, &mut tokio::io::stdout()).await;
 
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn main() {
     println!("This example is only for Windows");
 }

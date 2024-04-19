@@ -15,27 +15,25 @@
 */
 use std::{collections::HashMap, sync::Arc};
 
-use async_trait::async_trait;
 use containerd_shim::{
     api::{
-        CreateTaskRequest, CreateTaskResponse, DeleteRequest, Empty, ExecProcessRequest,
-        KillRequest, ResizePtyRequest, ShutdownRequest, StartRequest, StartResponse, StateRequest,
+        CreateTaskRequest, CreateTaskResponse, DeleteRequest, ExecProcessRequest, KillRequest,
+        ResizePtyRequest, ShutdownRequest, StartRequest, StartResponse, StateRequest,
         StateResponse, Status, WaitRequest, WaitResponse,
     },
     asynchronous::ExitSignal,
     event::Event,
     protos::{
         api::{
-            CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest,
+            CloseIoRequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest,
             PidsResponse, StatsRequest, StatsResponse, UpdateTaskRequest,
         },
-        events::task::{TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskIO, TaskStart},
-        protobuf::MessageDyn,
-        shim_async::Task,
-        ttrpc,
-        ttrpc::r#async::TtrpcContext,
+        events::{TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskIo, TaskStart},
+        prost_types::Any,
+        shim::Task,
+        trapeze,
     },
-    util::{convert_to_any, convert_to_timestamp, AsOption},
+    util::{convert_to_timestamp, AsOption},
     TtrpcResult,
 };
 use log::{debug, info, warn};
@@ -43,7 +41,7 @@ use oci_spec::runtime::LinuxResources;
 use tokio::sync::{mpsc::Sender, MappedMutexGuard, Mutex, MutexGuard};
 
 use super::container::{Container, ContainerFactory};
-type EventSender = Sender<(String, Box<dyn MessageDyn>)>;
+type EventSender = Sender<(String, Any)>;
 
 #[cfg(target_os = "linux")]
 use std::path::Path;
@@ -54,7 +52,7 @@ use cgroups_rs::hierarchies::is_cgroup2_unified_mode;
 use containerd_shim::{
     error::{Error, Result},
     other_error,
-    protos::events::task::TaskOOM,
+    protos::events::TaskOom,
 };
 #[cfg(target_os = "linux")]
 use log::error;
@@ -67,7 +65,11 @@ use crate::cgroup_memory;
 /// TaskService is a Task template struct, it is considered a helper struct,
 /// which has already implemented `Task` trait, so that users can make it the type `T`
 /// parameter of `Service`, and implements their own `ContainerFactory` and `Container`.
-pub struct TaskService<F, C> {
+pub struct TaskService<F, C>
+where
+    F: ContainerFactory<C> + Sync + Send + 'static,
+    C: Container + Sync + Send + 'static,
+{
     pub factory: F,
     pub containers: Arc<Mutex<HashMap<String, C>>>,
     pub namespace: String,
@@ -77,7 +79,8 @@ pub struct TaskService<F, C> {
 
 impl<F, C> TaskService<F, C>
 where
-    F: Default,
+    F: ContainerFactory<C> + Sync + Send + Default + 'static,
+    C: Container + Sync + Send + 'static,
 {
     pub fn new(ns: &str, exit: Arc<ExitSignal>, tx: EventSender) -> Self {
         Self {
@@ -90,14 +93,17 @@ where
     }
 }
 
-impl<F, C> TaskService<F, C> {
+impl<F, C> TaskService<F, C>
+where
+    F: ContainerFactory<C> + Sync + Send + 'static,
+    C: Container + Sync + Send + 'static,
+{
     pub async fn get_container(&self, id: &str) -> TtrpcResult<MappedMutexGuard<'_, C>> {
         let mut containers = self.containers.lock().await;
-        containers.get_mut(id).ok_or_else(|| {
-            ttrpc::Error::RpcStatus(ttrpc::get_status(
-                ttrpc::Code::NOT_FOUND,
-                format!("can not find container by id {}", id),
-            ))
+        containers.get_mut(id).ok_or_else(|| trapeze::Status {
+            code: trapeze::Code::NotFound.into(),
+            message: format!("can not find container by id {}", id),
+            ..Default::default()
         })?;
         let container = MutexGuard::map(containers, |m| m.get_mut(id).unwrap());
         Ok(container)
@@ -106,7 +112,7 @@ impl<F, C> TaskService<F, C> {
     pub async fn send_event(&self, event: impl Event) {
         let topic = event.topic();
         self.tx
-            .send((topic.to_string(), Box::new(event)))
+            .send((topic.to_string(), Any::from_msg(&event).unwrap()))
             .await
             .unwrap_or_else(|e| warn!("send {} to publisher: {}", topic, e));
     }
@@ -114,12 +120,12 @@ impl<F, C> TaskService<F, C> {
 
 #[cfg(target_os = "linux")]
 fn run_oom_monitor(mut rx: Receiver<String>, id: String, tx: EventSender) {
-    let oom_event = TaskOOM {
+    let oom_event = TaskOom {
         container_id: id,
         ..Default::default()
     };
     let topic = oom_event.topic();
-    let oom_box = Box::new(oom_event);
+    let oom_box = Any::from_msg(&oom_event).unwrap();
     spawn(async move {
         while let Some(_item) = rx.recv().await {
             tx.send((topic.to_string(), oom_box.clone()))
@@ -150,24 +156,19 @@ async fn monitor_oom(id: &String, pid: u32, tx: EventSender) -> Result<()> {
     Ok(())
 }
 
-#[async_trait]
 impl<F, C> Task for TaskService<F, C>
 where
-    F: ContainerFactory<C> + Sync + Send,
+    F: ContainerFactory<C> + Sync + Send + 'static,
     C: Container + Sync + Send + 'static,
 {
-    async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> TtrpcResult<StateResponse> {
-        let container = self.get_container(req.id()).await?;
-        let exec_id = req.exec_id().as_option();
+    async fn state(&self, req: StateRequest) -> TtrpcResult<StateResponse> {
+        let container = self.get_container(&req.id).await?;
+        let exec_id = req.exec_id.as_option();
         let resp = container.state(exec_id).await?;
         Ok(resp)
     }
 
-    async fn create(
-        &self,
-        _ctx: &TtrpcContext,
-        req: CreateTaskRequest,
-    ) -> TtrpcResult<CreateTaskResponse> {
+    async fn create(&self, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
         info!("Create request for {:?}", &req);
         // Note: Get containers here is for getting the lock,
         // to make sure no other threads manipulate the containers metadata;
@@ -177,9 +178,8 @@ where
         let id = req.id.as_str();
 
         let container = self.factory.create(ns, &req).await?;
-        let mut resp = CreateTaskResponse::new();
         let pid = container.pid().await as u32;
-        resp.pid = pid;
+        let resp = CreateTaskResponse { pid };
 
         containers.insert(id.to_string(), container);
 
@@ -187,7 +187,7 @@ where
             container_id: req.id.to_string(),
             bundle: req.bundle.to_string(),
             rootfs: req.rootfs,
-            io: Some(TaskIO {
+            io: Some(TaskIo {
                 stdin: req.stdin.to_string(),
                 stdout: req.stdout.to_string(),
                 stderr: req.stderr.to_string(),
@@ -204,13 +204,12 @@ where
         Ok(resp)
     }
 
-    async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> TtrpcResult<StartResponse> {
+    async fn start(&self, req: StartRequest) -> TtrpcResult<StartResponse> {
         info!("Start request for {:?}", &req);
-        let mut container = self.get_container(req.id()).await?;
+        let mut container = self.get_container(&req.id).await?;
         let pid = container.start(req.exec_id.as_str().as_option()).await?;
 
-        let mut resp = StartResponse::new();
-        resp.pid = pid as u32;
+        let resp = StartResponse { pid: pid as u32 };
 
         if req.exec_id.is_empty() {
             self.send_event(TaskStart {
@@ -233,25 +232,24 @@ where
             .await;
         };
 
-        info!("Start request for {:?} returns pid {}", req, resp.pid());
+        info!("Start request for {:?} returns pid {}", req, resp.pid);
         Ok(resp)
     }
 
-    async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
+    async fn delete(&self, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
         info!("Delete request for {:?}", &req);
         let mut containers = self.containers.lock().await;
-        let container = containers.get_mut(req.id()).ok_or_else(|| {
-            ttrpc::Error::RpcStatus(ttrpc::get_status(
-                ttrpc::Code::NOT_FOUND,
-                format!("can not find container by id {}", req.id()),
-            ))
+        let container = containers.get_mut(&req.id).ok_or_else(|| trapeze::Status {
+            code: trapeze::Code::NotFound.into(),
+            message: format!("can not find container by id {}", req.id),
+            ..Default::default()
         })?;
         let id = container.id().await;
-        let exec_id_opt = req.exec_id().as_option();
+        let exec_id_opt = req.exec_id.as_option();
         let (pid, exit_status, exited_at) = container.delete(exec_id_opt).await?;
         self.factory.cleanup(&self.namespace, container).await?;
-        if req.exec_id().is_empty() {
-            containers.remove(req.id());
+        if req.exec_id.is_empty() {
+            containers.remove(&req.id);
         }
 
         let ts = convert_to_timestamp(exited_at);
@@ -264,22 +262,21 @@ where
         })
         .await;
 
-        let mut resp = DeleteResponse::new();
-        resp.set_exited_at(ts);
-        resp.set_pid(pid as u32);
-        resp.set_exit_status(exit_status as u32);
+        let resp = DeleteResponse {
+            exited_at: ts.into(),
+            pid: pid as u32,
+            exit_status: exit_status as u32,
+        };
         info!(
             "Delete request for {} {} returns {:?}",
-            req.id(),
-            req.exec_id(),
-            resp
+            req.id, req.exec_id, resp
         );
         Ok(resp)
     }
 
-    async fn pids(&self, _ctx: &TtrpcContext, req: PidsRequest) -> TtrpcResult<PidsResponse> {
+    async fn pids(&self, req: PidsRequest) -> TtrpcResult<PidsResponse> {
         debug!("Pids request for {:?}", req);
-        let container = self.get_container(req.id()).await?;
+        let container = self.get_container(&req.id).await?;
         let processes = container.all_processes().await?;
         debug!("Pids request for {:?} returns successfully", req);
         Ok(PidsResponse {
@@ -288,20 +285,20 @@ where
         })
     }
 
-    async fn kill(&self, _ctx: &TtrpcContext, req: KillRequest) -> TtrpcResult<Empty> {
+    async fn kill(&self, req: KillRequest) -> TtrpcResult<()> {
         info!("Kill request for {:?}", req);
-        let mut container = self.get_container(req.id()).await?;
+        let mut container = self.get_container(&req.id).await?;
         container
-            .kill(req.exec_id().as_option(), req.signal, req.all)
+            .kill(req.exec_id.as_option(), req.signal, req.all)
             .await?;
         info!("Kill request for {:?} returns successfully", req);
-        Ok(Empty::new())
+        Ok(())
     }
 
-    async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> TtrpcResult<Empty> {
+    async fn exec(&self, req: ExecProcessRequest) -> TtrpcResult<()> {
         info!("Exec request for {:?}", req);
-        let exec_id = req.exec_id().to_string();
-        let mut container = self.get_container(req.id()).await?;
+        let exec_id = req.exec_id.clone();
+        let mut container = self.get_container(&req.id).await?;
         container.exec(req).await?;
 
         self.send_event(TaskExecAdded {
@@ -311,95 +308,89 @@ where
         })
         .await;
 
-        Ok(Empty::new())
+        Ok(())
     }
 
-    async fn resize_pty(&self, _ctx: &TtrpcContext, req: ResizePtyRequest) -> TtrpcResult<Empty> {
+    async fn resize_pty(&self, req: ResizePtyRequest) -> TtrpcResult<()> {
         debug!(
             "Resize pty request for container {}, exec_id: {}",
             &req.id, &req.exec_id
         );
-        let mut container = self.get_container(req.id()).await?;
+        let mut container = self.get_container(&req.id).await?;
         container
-            .resize_pty(req.exec_id().as_option(), req.height, req.width)
+            .resize_pty(req.exec_id.as_option(), req.height, req.width)
             .await?;
-        Ok(Empty::new())
+        Ok(())
     }
 
-    async fn close_io(&self, _ctx: &TtrpcContext, req: CloseIORequest) -> TtrpcResult<Empty> {
-        let mut container = self.get_container(req.id()).await?;
-        container.close_io(req.exec_id().as_option()).await?;
-        Ok(Empty::new())
+    async fn close_io(&self, req: CloseIoRequest) -> TtrpcResult<()> {
+        let mut container = self.get_container(&req.id).await?;
+        container.close_io(req.exec_id.as_option()).await?;
+        Ok(())
     }
 
-    async fn update(&self, _ctx: &TtrpcContext, mut req: UpdateTaskRequest) -> TtrpcResult<Empty> {
+    async fn update(&self, req: UpdateTaskRequest) -> TtrpcResult<()> {
         debug!("Update request for {:?}", req);
 
-        let id = req.take_id();
+        let id = req.id;
 
-        let data = req
-            .resources
-            .into_option()
-            .map(|r| r.value)
-            .unwrap_or_default();
+        let data = req.resources.map(|r| r.value).unwrap_or_default();
 
-        let resources: LinuxResources = serde_json::from_slice(&data).map_err(|e| {
-            ttrpc::Error::RpcStatus(ttrpc::get_status(
-                ttrpc::Code::INVALID_ARGUMENT,
-                format!("failed to parse resource spec: {}", e),
-            ))
-        })?;
+        let resources: LinuxResources =
+            serde_json::from_slice(&data).map_err(|e| trapeze::Status {
+                code: trapeze::Code::InvalidArgument.into(),
+                message: format!("failed to parse resource spec: {}", e),
+                ..Default::default()
+            })?;
 
         let mut container = self.get_container(&id).await?;
         container.update(&resources).await?;
-        Ok(Empty::new())
+        Ok(())
     }
 
-    async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
+    async fn wait(&self, req: WaitRequest) -> TtrpcResult<WaitResponse> {
         info!("Wait request for {:?}", req);
         let exec_id = req.exec_id.as_str().as_option();
         let wait_rx = {
-            let mut container = self.get_container(req.id()).await?;
+            let mut container = self.get_container(&req.id).await?;
             let state = container.state(exec_id).await?;
-            if state.status() != Status::RUNNING && state.status() != Status::CREATED {
-                let mut resp = WaitResponse::new();
-                resp.exit_status = state.exit_status;
-                resp.exited_at = state.exited_at;
+            if state.status() != Status::Running && state.status() != Status::Created {
+                let resp = WaitResponse {
+                    exit_status: state.exit_status,
+                    exited_at: state.exited_at.into(),
+                };
                 info!("Wait request for {:?} returns {:?}", req, &resp);
                 return Ok(resp);
             }
-            container.wait_channel(req.exec_id().as_option()).await?
+            container.wait_channel(req.exec_id.as_option()).await?
         };
 
         wait_rx.await.unwrap_or_default();
         // get lock again.
-        let container = self.get_container(req.id()).await?;
+        let container = self.get_container(&req.id).await?;
         let (_, code, exited_at) = container.get_exit_info(exec_id).await?;
-        let mut resp = WaitResponse::new();
-        resp.set_exit_status(code as u32);
-        let ts = convert_to_timestamp(exited_at);
-        resp.set_exited_at(ts);
+        let resp = WaitResponse {
+            exit_status: code as u32,
+            exited_at: convert_to_timestamp(exited_at).into(),
+        };
         info!("Wait request for {:?} returns {:?}", req, &resp);
         Ok(resp)
     }
 
-    async fn stats(&self, _ctx: &TtrpcContext, req: StatsRequest) -> TtrpcResult<StatsResponse> {
+    async fn stats(&self, req: StatsRequest) -> TtrpcResult<StatsResponse> {
         debug!("Stats request for {:?}", req);
-        let container = self.get_container(req.id()).await?;
+        let container = self.get_container(&req.id).await?;
         let stats = container.stats().await?;
 
-        let mut resp = StatsResponse::new();
-        resp.set_stats(convert_to_any(Box::new(stats))?);
+        let resp = StatsResponse {
+            stats: Any::from_msg(&stats).unwrap().into(),
+        };
         Ok(resp)
     }
 
-    async fn connect(
-        &self,
-        _ctx: &TtrpcContext,
-        req: ConnectRequest,
-    ) -> TtrpcResult<ConnectResponse> {
+    async fn connect(&self, req: ConnectRequest) -> TtrpcResult<ConnectResponse> {
         info!("Connect request for {:?}", req);
-        let container = self.get_container(req.id()).await?;
+        let container = self.get_container(&req.id).await?;
 
         Ok(ConnectResponse {
             shim_pid: std::process::id(),
@@ -408,13 +399,13 @@ where
         })
     }
 
-    async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> TtrpcResult<Empty> {
+    async fn shutdown(&self, _req: ShutdownRequest) -> TtrpcResult<()> {
         debug!("Shutdown request");
         let containers = self.containers.lock().await;
         if containers.len() > 0 {
-            return Ok(Empty::new());
+            return Ok(());
         }
         self.exit.signal();
-        Ok(Empty::default())
+        Ok(())
     }
 }

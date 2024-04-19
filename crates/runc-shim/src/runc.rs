@@ -35,11 +35,7 @@ use containerd_shim::{
     io_error,
     monitor::{ExitEvent, Subject, Topic},
     other, other_error,
-    protos::{
-        api::ProcessInfo,
-        cgroups::metrics::Metrics,
-        protobuf::{CodedInputStream, Message},
-    },
+    protos::{api::ProcessInfo, cgroups::metrics::Metrics, prost::Message as _},
     util::{asyncify, mkdir, mount_rootfs, read_file_to_str, write_options, write_runtime},
     Console, Error, ExitSignal, Result,
 };
@@ -80,22 +76,21 @@ impl ContainerFactory<RuncContainer> for RuncFactory {
         ns: &str,
         req: &CreateTaskRequest,
     ) -> containerd_shim::Result<RuncContainer> {
-        let bundle = req.bundle();
-        let mut opts = Options::new();
+        let bundle = &req.bundle;
+        let mut opts = Options::default();
         if let Some(any) = req.options.as_ref() {
-            let mut input = CodedInputStream::from_bytes(any.value.as_ref());
-            opts.merge_from(&mut input)?;
+            opts.merge(any.value.as_ref())?;
         }
-        if opts.compute_size() > 0 {
+        if opts.encoded_len() > 0 {
             debug!("create options: {:?}", &opts);
         }
         let runtime = opts.binary_name.as_str();
         write_options(bundle, &opts).await?;
         write_runtime(bundle, runtime).await?;
 
-        let rootfs_vec = req.rootfs().to_vec();
+        let rootfs_vec = &req.rootfs;
         let rootfs = if !rootfs_vec.is_empty() {
-            let tmp_rootfs = Path::new(bundle).join("rootfs");
+            let tmp_rootfs = Path::new(&bundle).join("rootfs");
             mkdir(&tmp_rootfs, 0o711).await?;
             tmp_rootfs
         } else {
@@ -114,13 +109,13 @@ impl ContainerFactory<RuncContainer> for RuncFactory {
             Some(Arc::new(ShimExecutor::default())),
         )?;
 
-        let id = req.id();
-        let stdio = Stdio::new(req.stdin(), req.stdout(), req.stderr(), req.terminal());
+        let id = &req.id;
+        let stdio = Stdio::new(&req.stdin, &req.stdout, &req.stderr, req.terminal);
 
         let mut init = InitProcess::new(
-            id,
+            &id,
             stdio,
-            RuncInitLifecycle::new(runc.clone(), opts.clone(), bundle),
+            RuncInitLifecycle::new(runc.clone(), opts.clone(), &bundle),
         );
 
         let config = CreateConfig::default();
@@ -224,7 +219,7 @@ impl ProcessFactory<ExecProcess> for RuncExecFactory {
     async fn create(&self, req: &ExecProcessRequest) -> Result<ExecProcess> {
         let p = get_spec_from_request(req)?;
         Ok(ExecProcess {
-            state: Status::CREATED,
+            state: Status::Created,
             id: req.exec_id.to_string(),
             stdio: Stdio {
                 stdin: req.stdin.to_string(),
@@ -264,7 +259,7 @@ impl ProcessLifecycle<InitProcess> for RuncInitLifecycle {
         if let Err(e) = self.runtime.start(p.id.as_str()).await {
             return Err(runtime_error(&p.lifecycle.bundle, e, "OCI runtime start failed").await);
         }
-        p.state = Status::RUNNING;
+        p.state = Status::Running;
         Ok(())
     }
 
@@ -353,9 +348,10 @@ impl ProcessLifecycle<InitProcess> for RuncInitLifecycle {
 
 impl RuncInitLifecycle {
     pub fn new(runtime: Runc, opts: Options, bundle: &str) -> Self {
+        #![allow(deprecated)]
         let work_dir = Path::new(bundle).join("work");
         let mut opts = opts;
-        if opts.criu_path().is_empty() {
+        if opts.criu_path.is_empty() {
             opts.criu_path = work_dir.to_string_lossy().to_string();
         }
         Self {
@@ -429,7 +425,7 @@ impl ProcessLifecycle<ExecProcess> for RuncExecLifecycle {
         copy_io_or_console(p, socket, pio, p.lifecycle.exit_signal.clone()).await?;
         let pid = read_file_to_str(pid_path).await?.parse::<i32>()?;
         p.pid = pid;
-        p.state = Status::RUNNING;
+        p.state = Status::Running;
         Ok(())
     }
 

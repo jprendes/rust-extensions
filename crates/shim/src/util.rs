@@ -21,18 +21,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-#[cfg(feature = "async")]
 pub use crate::asynchronous::util::*;
-#[cfg(not(feature = "async"))]
-pub use crate::synchronous::util::*;
-use crate::{
-    api::Options,
-    error::Result,
-    protos::protobuf::{
-        well_known_types::{any::Any, timestamp::Timestamp},
-        MessageDyn,
-    },
-};
+use crate::{api::Options, error::Result, protos::prost_types::Timestamp};
 
 pub const CONFIG_FILE_NAME: &str = "config.json";
 pub const OPTIONS_FILE_NAME: &str = "options.json";
@@ -64,6 +54,7 @@ pub struct JsonOptions {
 
 impl From<Options> for JsonOptions {
     fn from(o: Options) -> Self {
+        #![allow(deprecated)]
         Self {
             no_pivot_root: o.no_pivot_root,
             no_new_keyring: o.no_new_keyring,
@@ -82,6 +73,7 @@ impl From<Options> for JsonOptions {
 
 impl From<JsonOptions> for Options {
     fn from(j: JsonOptions) -> Self {
+        #![allow(deprecated)]
         Self {
             no_pivot_root: j.no_pivot_root,
             no_new_keyring: j.no_new_keyring,
@@ -148,23 +140,13 @@ pub fn timestamp() -> Result<Timestamp> {
 }
 
 pub fn convert_to_timestamp(exited_at: Option<OffsetDateTime>) -> Timestamp {
-    let mut ts = Timestamp::new();
-    if let Some(ea) = exited_at {
-        ts.seconds = ea.unix_timestamp();
-        ts.nanos = ea.nanosecond() as i32;
+    let Some(ea) = exited_at else {
+        return Timestamp::default();
+    };
+    Timestamp {
+        seconds: ea.unix_timestamp(),
+        nanos: ea.nanosecond() as i32,
     }
-    ts
-}
-
-pub fn convert_to_any(obj: Box<dyn MessageDyn>) -> Result<Any> {
-    let mut data = Vec::new();
-    obj.write_to_vec_dyn(&mut data)?;
-
-    let mut any = Any::new();
-    any.value = data;
-    any.type_url = obj.descriptor_dyn().full_name().to_string();
-
-    Ok(any)
 }
 
 pub trait IntoOption

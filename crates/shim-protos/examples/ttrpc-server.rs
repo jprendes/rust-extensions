@@ -13,13 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{sync::Arc, thread};
-
-use containerd_shim_protos::{
-    api::{CreateTaskRequest, CreateTaskResponse},
-    create_task, Task,
-};
-use ttrpc::Server;
+use containerd_shim_protos::api::{CreateTaskRequest, CreateTaskResponse};
+use containerd_shim_protos::Task;
+use tokio::signal::ctrl_c;
+use trapeze::{get_context, service, Result, Server};
 
 #[derive(Debug, PartialEq)]
 struct FakeServer {
@@ -33,12 +30,8 @@ impl FakeServer {
 }
 
 impl Task for FakeServer {
-    fn create(
-        &self,
-        ctx: &::ttrpc::TtrpcContext,
-        req: CreateTaskRequest,
-    ) -> ::ttrpc::Result<CreateTaskResponse> {
-        let mut resp = CreateTaskResponse::default();
+    async fn create(&self, req: CreateTaskRequest) -> Result<CreateTaskResponse> {
+        let ctx = get_context();
         let md = &ctx.metadata;
         let v1 = md.get("key-1").unwrap();
         let v2 = md.get("key-2").unwrap();
@@ -48,35 +41,28 @@ impl Task for FakeServer {
         assert_eq!(v2[0], "value-2");
         assert_eq!(&req.id, "id1");
 
-        resp.set_pid(0x10c0);
-
-        Ok(resp)
+        Ok(CreateTaskResponse { pid: 0x10c0 })
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     simple_logger::SimpleLogger::new().init().unwrap();
 
-    let t = Box::new(FakeServer::new()) as Box<dyn Task + Send + Sync>;
-    let t = Arc::new(t);
-    let tservice = create_task(t);
+    let server = async move {
+        Server::new()
+            .register(service!(FakeServer::new() : Task))
+            .bind("unix:///tmp/shim-proto-ttrpc-001")
+            .await
+            .unwrap();
+    };
 
-    let mut server = Server::new()
-        .bind("unix:///tmp/shim-proto-ttrpc-001")
-        .unwrap()
-        .register_service(tservice);
+    let ctrl_c = async move {
+        ctrl_c().await.expect("Failed to wait for Ctrl+C.");
+    };
 
-    server.start().unwrap();
-
-    // Hold the main thread until receiving signal SIGTERM
-    let (tx, rx) = std::sync::mpsc::channel();
-    thread::spawn(move || {
-        ctrlc::set_handler(move || {
-            tx.send(()).unwrap();
-        })
-        .expect("Error setting Ctrl-C handler");
-        println!("Server is running, press Ctrl + C to exit");
-    });
-
-    rx.recv().unwrap();
+    tokio::select! {
+        _ = server => {},
+        _ = ctrl_c => {},
+    };
 }

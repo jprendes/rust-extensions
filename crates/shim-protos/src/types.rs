@@ -14,6 +14,12 @@
    limitations under the License.
 */
 
+pub use crate::private::containerd::types::*;
+pub use crate::private::containerd::v1::types::*;
+
+//include!(concat!(env!("OUT_DIR"), "/types/mod.rs"));
+
+/*
 pub mod empty {
     include!(concat!(env!("OUT_DIR"), "/types/empty.rs"));
 }
@@ -38,3 +44,4 @@ pub mod fieldpath {
 pub mod platform {
     include!(concat!(env!("OUT_DIR"), "/types/platform.rs"));
 }
+*/

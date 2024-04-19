@@ -26,10 +26,7 @@ use std::{
 pub use containerd_shim_protos as protos;
 #[cfg(unix)]
 use nix::ioctl_write_ptr_bad;
-pub use protos::{
-    shim::shim::DeleteResponse,
-    ttrpc::{context::Context, Result as TtrpcResult},
-};
+pub use protos::{shim::shim::DeleteResponse, trapeze::Result as TtrpcResult};
 #[cfg(unix)]
 ioctl_write_ptr_bad!(ioctl_set_winsz, libc::TIOCSWINSZ, libc::winsize);
 
@@ -39,18 +36,14 @@ use std::{fs::OpenOptions, os::windows::prelude::OpenOptionsExt};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
 
-#[cfg(feature = "async")]
 pub use crate::asynchronous::*;
 pub use crate::error::{Error, Result};
-#[cfg(not(feature = "async"))]
-pub use crate::synchronous::*;
 
 #[macro_use]
 pub mod error;
 
 mod args;
 pub use args::{parse, Flags};
-#[cfg(feature = "async")]
 pub mod asynchronous;
 pub mod cgroup;
 pub mod event;
@@ -58,8 +51,6 @@ mod logger;
 pub mod monitor;
 pub mod mount;
 mod reap;
-#[cfg(not(feature = "async"))]
-pub mod synchronous;
 mod sys;
 pub mod util;
 
@@ -68,43 +59,11 @@ pub mod api {
     pub use super::protos::{
         api::Status,
         shim::{oci::Options, shim::*},
-        types::empty::Empty,
     };
 }
 
-macro_rules! cfg_not_async {
-    ($($item:item)*) => {
-        $(
-            #[cfg(not(feature = "async"))]
-            #[cfg_attr(docsrs, doc(cfg(not(feature = "async"))))]
-            $item
-        )*
-    }
-}
-
-macro_rules! cfg_async {
-    ($($item:item)*) => {
-        $(
-            #[cfg(feature = "async")]
-            #[cfg_attr(docsrs, doc(cfg(feature = "async")))]
-            $item
-        )*
-    }
-}
-
-cfg_not_async! {
-    pub use crate::synchronous::*;
-    pub use crate::synchronous::publisher;
-    pub use protos::shim::shim_ttrpc::Task;
-    pub use protos::ttrpc::TtrpcContext;
-}
-
-cfg_async! {
-    pub use crate::asynchronous::*;
-    pub use crate::asynchronous::publisher;
-    pub use protos::shim_async::Task;
-    pub use protos::ttrpc::r#async::TtrpcContext;
-}
+pub use crate::asynchronous::publisher;
+pub use protos::shim::Task;
 
 const TTRPC_ADDRESS: &str = "TTRPC_ADDRESS";
 
