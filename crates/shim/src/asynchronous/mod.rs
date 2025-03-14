@@ -15,11 +15,11 @@
 */
 
 use std::{
-    convert::TryFrom,
     env,
     io::Read,
     os::unix::{fs::FileTypeExt, net::UnixListener},
     path::Path,
+    pin::pin,
     process::{self, Command as StdCommand, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -36,19 +36,8 @@ use containerd_shim_protos::{
     ttrpc::r#async::Server,
     types::introspection::{self, RuntimeInfo},
 };
-use futures::StreamExt;
-use libc::{SIGCHLD, SIGINT, SIGPIPE, SIGTERM};
 use log::{debug, error, info, warn};
-use nix::{
-    errno::Errno,
-    sys::{
-        signal::Signal,
-        wait::{self, WaitPidFlag, WaitStatus},
-    },
-    unistd::Pid,
-};
 use oci_spec::runtime::Features;
-use signal_hook_tokio::Signals;
 use tokio::{io::AsyncWriteExt, process::Command, sync::Notify};
 use which::which;
 
@@ -173,9 +162,6 @@ where
     // Create shim instance
     let mut config = opts.unwrap_or_default();
 
-    // Setup signals
-    let signals = setup_signals_tokio(&config);
-
     if !config.no_sub_reaper {
         reap::set_subreaper()?;
     }
@@ -205,7 +191,7 @@ where
         }
         "delete" => {
             tokio::spawn(async move {
-                handle_signals(signals).await;
+                handle_signals(!config.no_reaper).await;
             });
             let response = shim.delete_shim().await?;
             let resp_bytes = response.write_to_bytes()?;
@@ -247,7 +233,7 @@ where
 
             info!("Shim successfully started, waiting for exit signal...");
             tokio::spawn(async move {
-                handle_signals(signals).await;
+                handle_signals(!config.no_reaper).await;
             });
             shim.wait().await;
 
@@ -388,64 +374,57 @@ fn signal_server_started() {
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "info"))]
-fn setup_signals_tokio(config: &Config) -> Signals {
-    if config.no_reaper {
-        Signals::new([SIGTERM, SIGINT, SIGPIPE]).expect("new signal failed")
-    } else {
-        Signals::new([SIGTERM, SIGINT, SIGPIPE, SIGCHLD]).expect("new signal failed")
-    }
-}
+async fn handle_signals(reaper: bool) {
+    use nix::{
+        errno::Errno,
+        sys::wait::{self, WaitPidFlag, WaitStatus},
+        unistd::Pid,
+    };
+    use tokio::signal::unix::{signal, SignalKind};
 
-#[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "info"))]
-async fn handle_signals(signals: Signals) {
-    let mut signals = signals.fuse();
-    while let Some(sig) = signals.next().await {
-        match sig {
-            SIGPIPE => {}
-            SIGTERM | SIGINT => {
-                debug!("received {}", sig);
-            }
-            SIGCHLD => loop {
-                // Note: see comment at the counterpart in synchronous/mod.rs for details.
-                match asyncify(move || {
-                    Ok(wait::waitpid(
-                        Some(Pid::from_raw(-1)),
-                        Some(WaitPidFlag::WNOHANG),
-                    )?)
-                })
-                .await
-                {
-                    Ok(WaitStatus::Exited(pid, status)) => {
-                        monitor_notify_by_pid(pid.as_raw(), status)
+    let mut terminate = pin!(signal(SignalKind::terminate()).unwrap());
+    let mut interrupt = pin!(signal(SignalKind::interrupt()).unwrap());
+    let mut pipe = pin!(signal(SignalKind::pipe()).unwrap());
+    let mut child = pin!(signal(SignalKind::child()).unwrap());
+
+    loop {
+        tokio::select! {
+            _ = pipe.recv() => {
+                // no-op
+            },
+            _ = interrupt.recv() => {
+                debug!("received SIGINT");
+            },
+            _ = terminate.recv() => {
+                debug!("received SIGTERM");
+            },
+            _ = child.recv(), if reaper => {
+                loop {
+                    // Note: see comment at the counterpart in synchronous/mod.rs for details.
+                    match wait::waitpid(Some(Pid::from_raw(-1)), Some(WaitPidFlag::WNOHANG)) {
+                        Ok(WaitStatus::Exited(pid, status)) => monitor_notify_by_pid(pid.as_raw(), status)
                             .await
-                            .unwrap_or_else(|e| error!("failed to send exit event {}", e))
+                            .unwrap_or_else(|e| error!("failed to send exit event {}", e)),
+                        Ok(WaitStatus::Signaled(pid, sig, _)) => {
+                            debug!("child {} terminated({})", pid, sig);
+                            let exit_code = 128 + sig as i32;
+                            monitor_notify_by_pid(pid.as_raw(), exit_code)
+                                .await
+                                .unwrap_or_else(|e| error!("failed to send signal event {}", e))
+                        }
+                        Ok(WaitStatus::StillAlive) => {
+                            break;
+                        }
+                        Err(Errno::ECHILD) => {
+                            break;
+                        }
+                        Err(e) => {
+                            warn!("error occurred in signal handler: {}", e);
+                        }
+                        _ => {}
                     }
-                    Ok(WaitStatus::Signaled(pid, sig, _)) => {
-                        debug!("child {} terminated({})", pid, sig);
-                        let exit_code = 128 + sig as i32;
-                        monitor_notify_by_pid(pid.as_raw(), exit_code)
-                            .await
-                            .unwrap_or_else(|e| error!("failed to send signal event {}", e))
-                    }
-                    Ok(WaitStatus::StillAlive) => {
-                        break;
-                    }
-                    Err(Error::Nix(Errno::ECHILD)) => {
-                        break;
-                    }
-                    Err(e) => {
-                        warn!("error occurred in signal handler: {}", e);
-                    }
-                    _ => {}
                 }
             },
-            _ => {
-                if let Ok(sig) = Signal::try_from(sig) {
-                    debug!("received {}", sig);
-                } else {
-                    warn!("received invalid signal {}", sig);
-                }
-            }
         }
     }
 }
