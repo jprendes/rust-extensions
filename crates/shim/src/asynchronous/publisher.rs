@@ -133,8 +133,8 @@ impl RemotePublisher {
         })
         .await?;
 
-        // Client::new() takes ownership of the RawFd.
-        Ok(Client::new(fd))
+        // Client::from_raw_unix_socket_fd() takes ownership of the RawFd.
+        Ok(unsafe { Client::from_raw_unix_socket_fd(fd) })
     }
 
     /// Publish a new event.
@@ -171,17 +171,14 @@ impl RemotePublisher {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        os::unix::{io::AsRawFd, net::UnixListener},
-        sync::Arc,
-    };
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use containerd_shim_protos::{
         api::{Empty, ForwardRequest},
         events::task::TaskOOM,
         shim_async::{create_events, Events},
-        ttrpc::asynchronous::Server,
+        ttrpc::asynchronous::{transport::Listener, Server},
     };
     use tokio::sync::{
         mpsc::{channel, Sender},
@@ -222,14 +219,11 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let barrier2 = barrier.clone();
         let server_thread = tokio::spawn(async move {
-            let listener = UnixListener::bind(&path1).unwrap();
+            let listener = Listener::bind_unix(&path1).unwrap();
             let service = create_events(Arc::new(Box::new(server)));
             let mut server = Server::new()
-                .set_domain_unix()
-                .add_listener(listener.as_raw_fd())
-                .unwrap()
+                .add_listener(listener)
                 .register_service(service);
-            std::mem::forget(listener);
             server.start().await.unwrap();
             barrier2.wait().await;
 
