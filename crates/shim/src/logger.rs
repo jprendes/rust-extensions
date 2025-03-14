@@ -68,7 +68,7 @@ impl FifoLogger {
         FifoLogger { file }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(feature = "async")))]
     pub fn with_named_pipe(name: &str) -> io::Result<FifoLogger> {
         // Containerd on windows expects the log to be a named pipe in the format of \\.\pipe\containerd-<namespace>-<id>-log
         // There is an assumption that there is always only one client connected which is containerd.
@@ -120,6 +120,34 @@ impl FifoLogger {
                     if event.is_readable() {
                         pipe_server.disconnect().unwrap();
                     }
+                }
+            }
+        });
+
+        Ok(FifoLogger::with_file(file))
+    }
+
+    #[cfg(all(windows, feature = "async"))]
+    pub fn with_named_pipe(name: &str) -> io::Result<FifoLogger> {
+        // Containerd on windows expects the log to be a named pipe in the format of \\.\pipe\containerd-<namespace>-<id>-log
+        // There is an assumption that there is always only one client connected which is containerd.
+        // If there is a restart of containerd then logs during that time period will be lost.
+        //
+        // https://github.com/containerd/containerd/blob/v1.7.0/runtime/v2/shim_windows.go#L77
+        // https://github.com/microsoft/hcsshim/blob/5871d0c4436f131c377655a3eb09fc9b5065f11d/cmd/containerd-shim-runhcs-v1/serve.go#L132-L137
+
+        use std::os::windows::io::AsHandle;
+
+        use tokio::net::windows::named_pipe::ServerOptions;
+
+        let pipe = ServerOptions::new().create(name)?;
+        let file = File::from(pipe.as_handle().try_clone_to_owned()?);
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = pipe.connect() => {},
+                    _ = pipe.readable() => { pipe.disconnect(); }
                 }
             }
         });
