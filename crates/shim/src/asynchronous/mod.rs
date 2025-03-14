@@ -353,8 +353,7 @@ async fn create_server(flags: &args::Flags) -> Result<Server> {
     use std::os::fd::IntoRawFd;
     let listener = start_listener(&flags.socket).await?;
     let mut server = Server::new();
-    server = server.add_listener(listener.into_raw_fd())?;
-    server = server.set_domain_unix();
+    server = unsafe { server.add_unix_listener(listener.into_raw_fd())? };
     Ok(server)
 }
 
@@ -487,14 +486,11 @@ async fn start_listener(address: &str) -> Result<UnixListener> {
 
 #[cfg_attr(feature = "tracing", tracing::instrument(level = "info"))]
 async fn wait_socket_working(address: &str, interval_in_ms: u64, count: u32) -> Result<()> {
-    for _i in 0..count {
-        match Client::connect(address) {
-            Ok(_) => {
-                return Ok(());
-            }
-            Err(_) => {
-                tokio::time::sleep(std::time::Duration::from_millis(interval_in_ms)).await;
-            }
+    let timeout = std::time::Duration::from_millis(interval_in_ms);
+    for _ in 0..count {
+        tokio::select! {
+            Ok(_) = Client::connect(address) => return Ok(()),
+            _ = tokio::time::sleep(timeout) => {},
         }
     }
     Err(other!("time out waiting for socket {}", address))
