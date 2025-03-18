@@ -14,22 +14,19 @@
    limitations under the License.
 */
 
-use std::os::unix::io::RawFd;
-
 use containerd_shim_protos::{
     api::Envelope,
     protobuf::MessageDyn,
     shim::events,
     shim_async::{Client, EventsClient},
-    ttrpc,
-    ttrpc::context::Context,
+    ttrpc::{self, asynchronous::transport::Socket, context::Context},
 };
 use log::{debug, error, warn};
 use tokio::sync::mpsc;
 
 use crate::{
     error::{self, Result},
-    util::{asyncify, connect, convert_to_any, timestamp},
+    util::{convert_to_any, timestamp},
 };
 
 /// The publisher reports events and uses a queue to retry the event reporting.
@@ -126,15 +123,10 @@ impl RemotePublisher {
     }
 
     async fn connect(address: impl AsRef<str>) -> Result<Client> {
-        let addr = address.as_ref().to_string();
-        let fd = asyncify(move || -> Result<RawFd> {
-            let fd = connect(addr)?;
-            Ok(fd)
-        })
-        .await?;
-
-        // Client::from_raw_unix_socket_fd() takes ownership of the RawFd.
-        Ok(unsafe { Client::from_raw_unix_socket_fd(fd) })
+        let conn = Socket::connect_unix(address)
+            .await
+            .map_err(io_error!(e, "error connecting client"))?;
+        Ok(Client::new(conn))
     }
 
     /// Publish a new event.
