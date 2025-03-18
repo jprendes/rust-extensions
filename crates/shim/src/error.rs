@@ -107,7 +107,7 @@ impl From<Error> for ttrpc::Error {
 #[macro_export]
 macro_rules! io_error {
     ($e:ident, $($args:tt)+) => {
-        |$e| Error::IoError {
+        |$e| $crate::Error::IoError {
             context: format_args!($($args)+).to_string(),
             err: $e,
         }
@@ -117,7 +117,7 @@ macro_rules! io_error {
 #[macro_export]
 macro_rules! mount_error {
     ($e:ident, $($args:tt)+) => {
-        |$e| Error::MountError {
+        |$e| $crate::Error::MountError {
             context: format_args!($($args)+).to_string(),
             err: $e,
         }

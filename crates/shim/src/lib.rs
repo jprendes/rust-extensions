@@ -198,7 +198,7 @@ fn start_listener(address: &str) -> std::io::Result<()> {
         .write(true)
         .custom_flags(FILE_FLAG_OVERLAPPED);
     if let Ok(f) = opts.open(address) {
-        info!("found existing named pipe: {}", address);
+        log::info!("found existing named pipe: {}", address);
         drop(f);
         return Err(std::io::Error::new(
             std::io::ErrorKind::AddrInUse,

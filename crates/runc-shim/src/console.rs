@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use containerd_shim::{io_error, util::mkdir, Error, Result};
+use containerd_shim::{io_error, util::mkdir, Result};
 use log::warn;
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;

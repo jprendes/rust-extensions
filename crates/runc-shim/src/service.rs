@@ -32,7 +32,7 @@ use containerd_shim::{
         convert_to_timestamp, read_options, read_pid_from_file, read_runtime, read_spec, timestamp,
         write_str_to_file,
     },
-    Config, DeleteResponse, Error, Flags, StartOpts,
+    Config, DeleteResponse, Flags, StartOpts,
 };
 use log::{debug, error, warn};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -68,16 +68,13 @@ impl Shim for Service {
     async fn start_shim(&mut self, opts: StartOpts) -> containerd_shim::Result<String> {
         let mut grouping = opts.id.clone();
         let spec = read_spec("").await?;
-        match spec.annotations() {
-            Some(annotations) => {
-                for &label in GROUP_LABELS.iter() {
-                    if let Some(value) = annotations.get(label) {
-                        grouping = value.to_string();
-                        break;
-                    }
+        if let Some(annotations) = spec.annotations() {
+            for &label in GROUP_LABELS.iter() {
+                if let Some(value) = annotations.get(label) {
+                    grouping = value.to_string();
+                    break;
                 }
             }
-            None => {}
         }
         #[cfg(not(target_os = "linux"))]
         let thp_disabled = String::new();
