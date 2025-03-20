@@ -17,7 +17,7 @@
 use std::{
     env,
     io::Read,
-    os::unix::{fs::FileTypeExt, net::UnixListener},
+    os::unix::fs::FileTypeExt,
     path::Path,
     pin::pin,
     process::{self, Command as StdCommand, Stdio},
@@ -33,7 +33,7 @@ use containerd_shim_protos::{
     protobuf::{well_known_types::any::Any, Message, MessageField},
     shim::oci::Options,
     shim_async::{create_task, Client, Task},
-    ttrpc::r#async::Server,
+    ttrpc::r#async::{transport::Listener, Server},
     types::introspection::{self, RuntimeInfo},
 };
 use log::{debug, error, info, warn};
@@ -48,7 +48,7 @@ use crate::{
     asynchronous::{monitor::monitor_notify_by_pid, publisher::RemotePublisher},
     error::{Error, Result},
     logger, parse_sockaddr, reap, socket_address,
-    util::{asyncify, read_file_to_str, write_str_to_file},
+    util::{read_file_to_str, write_str_to_file},
     Config, Flags, StartOpts, TTRPC_ADDRESS,
 };
 
@@ -222,7 +222,7 @@ where
             let task = Box::new(shim.create_task_service(publisher).await)
                 as Box<dyn containerd_shim_protos::shim_async::Task + Send + Sync>;
             let task_service = create_task(Arc::from(task));
-            let Some(mut server) = create_server_with_retry(&flags).await? else {
+            let Some(mut server) = create_server_with_retry(&flags.socket).await? else {
                 signal_server_started();
                 return Ok(());
             };
@@ -335,32 +335,35 @@ pub async fn spawn(opts: StartOpts, grouping: &str, vars: Vec<(&str, &str)>) -> 
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "info"))]
-async fn create_server(flags: &args::Flags) -> Result<Server> {
-    use std::os::fd::IntoRawFd;
-    let listener = start_listener(&flags.socket).await?;
-    let mut server = Server::new();
-    server = unsafe { server.add_unix_listener(listener.into_raw_fd())? };
-    Ok(server)
+async fn start_listener(address: &str) -> std::io::Result<Listener> {
+    #[cfg(unix)]
+    if let Some(path) = address.strip_prefix("unix://") {
+        if let Some(parent) = Path::new(path).parent() {
+            // Try to create the needed directory hierarchy.
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    Listener::bind(address)
 }
 
-async fn create_server_with_retry(flags: &args::Flags) -> Result<Option<Server>> {
+async fn create_server_with_retry(address: &str) -> Result<Option<Server>> {
     // Really try to create a server.
-    let server = match create_server(flags).await {
-        Ok(server) => server,
-        Err(Error::IoError { err, .. }) if err.kind() == std::io::ErrorKind::AddrInUse => {
+    let listener = match start_listener(address).await {
+        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
             // If the address is already in use then make sure it is up and running and return the address
             // This allows for running a single shim per container scenarios
-            if let Ok(()) = wait_socket_working(&flags.socket, 5, 200).await {
-                write_str_to_file("address", &flags.socket).await?;
+            if let Ok(()) = wait_socket_working(address, 5, 200).await {
+                write_str_to_file("address", address).await?;
                 return Ok(None);
             }
-            remove_socket(&flags.socket).await?;
-            create_server(flags).await?
+            remove_socket(address).await?;
+            start_listener(address).await
         }
-        Err(e) => return Err(e),
-    };
+        other => other,
+    }
+    .map_err(io_error!(e, "Binding listener: {e:?}"))?;
 
-    Ok(Some(server))
+    Ok(Some(Server::new().add_listener(listener)))
 }
 
 fn signal_server_started() {
@@ -451,18 +454,6 @@ async fn remove_socket(address: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(feature = "tracing", tracing::instrument(skip_all, level = "info"))]
-async fn start_listener(address: &str) -> Result<UnixListener> {
-    let addr = address.to_string();
-    asyncify(move || -> Result<UnixListener> {
-        crate::start_listener(&addr).map_err(|e| Error::IoError {
-            context: format!("failed to start listener {}", addr),
-            err: e,
-        })
-    })
-    .await
-}
-
 #[cfg_attr(feature = "tracing", tracing::instrument(level = "info"))]
 async fn wait_socket_working(address: &str, interval_in_ms: u64, count: u32) -> Result<()> {
     let timeout = std::time::Duration::from_millis(interval_in_ms);
@@ -477,9 +468,7 @@ async fn wait_socket_working(address: &str, interval_in_ms: u64, count: u32) -> 
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use crate::asynchronous::{start_listener, ExitSignal};
+    use super::*;
 
     #[tokio::test]
     async fn test_exit_signal() {
@@ -498,14 +487,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_start_listener() {
+    async fn test_listener_binding() {
         let tmpdir = tempfile::tempdir().unwrap();
         let path = tmpdir.path().to_str().unwrap().to_owned();
 
-        let socket = path + "/ns1/id1/socket";
+        let socket = format!("unix://{path}/ns1/id1/socket");
         let _listener = start_listener(&socket).await.unwrap();
         let _listener2 = start_listener(&socket)
             .await
+            .map(|_| ())
             .expect_err("socket should already in use");
 
         let socket2 = socket + "/socket";
@@ -513,8 +503,9 @@ mod tests {
 
         let path = tmpdir.path().to_str().unwrap().to_owned();
         let txt_file = path + "/demo.txt";
+        let txt_file_url = format!("unix://{txt_file}");
         tokio::fs::write(&txt_file, "test").await.unwrap();
-        assert!(start_listener(&txt_file).await.is_err());
+        assert!(start_listener(&txt_file_url).await.is_err());
         let context = tokio::fs::read_to_string(&txt_file).await.unwrap();
         assert_eq!(context, "test");
     }
