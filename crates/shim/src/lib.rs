@@ -17,8 +17,6 @@
 #![cfg_attr(feature = "docs", doc = include_str!("../README.md"))]
 
 use std::{fs::File, path::PathBuf};
-#[cfg(unix)]
-use std::{os::unix::net::UnixListener, path::Path};
 
 pub use containerd_shim_protos as protos;
 #[cfg(unix)]
@@ -31,12 +29,6 @@ use sha2::{Digest, Sha256};
 
 #[cfg(unix)]
 ioctl_write_ptr_bad!(ioctl_set_winsz, libc::TIOCSWINSZ, libc::winsize);
-
-#[cfg(windows)]
-use std::{fs::OpenOptions, os::windows::prelude::OpenOptionsExt};
-
-#[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED;
 
 #[cfg(feature = "async")]
 pub use crate::asynchronous::*;
@@ -191,77 +183,6 @@ fn parse_sockaddr(addr: &str) -> &str {
     addr
 }
 
-#[cfg(windows)]
-fn start_listener(address: &str) -> std::io::Result<()> {
-    let mut opts = OpenOptions::new();
-    opts.read(true)
-        .write(true)
-        .custom_flags(FILE_FLAG_OVERLAPPED);
-    if let Ok(f) = opts.open(address) {
-        log::info!("found existing named pipe: {}", address);
-        drop(f);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AddrInUse,
-            "address already exists",
-        ));
-    }
-
-    // windows starts the listener on the second invocation of the shim
-    Ok(())
-}
-
-#[cfg(unix)]
-fn start_listener(address: &str) -> std::io::Result<UnixListener> {
-    let path = parse_sockaddr(address);
-    // Try to create the needed directory hierarchy.
-    if let Some(parent) = Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    UnixListener::bind(path)
-}
-
 pub struct Console {
     pub file: File,
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::start_listener;
-
-    #[test]
-    #[cfg(unix)]
-    fn test_start_listener() {
-        let tmpdir = tempfile::tempdir().unwrap();
-        let path = tmpdir.path().to_str().unwrap().to_owned();
-
-        // A little dangerous, may be turned on under controlled environment.
-        //assert!(start_listener("/").is_err());
-        //assert!(start_listener("/tmp").is_err());
-
-        let socket = path + "/ns1/id1/socket";
-        let _listener = start_listener(&socket).unwrap();
-        let _listener2 = start_listener(&socket).expect_err("socket should already in use");
-
-        let socket2 = socket + "/socket";
-        assert!(start_listener(&socket2).is_err());
-
-        let path = tmpdir.path().to_str().unwrap().to_owned();
-        let txt_file = path + "demo.txt";
-        std::fs::write(&txt_file, "test").unwrap();
-        assert!(start_listener(&txt_file).is_err());
-        let context = std::fs::read_to_string(&txt_file).unwrap();
-        assert_eq!(context, "test");
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn test_start_listener_windows() {
-        use mio::windows::NamedPipe;
-
-        let named_pipe = "\\\\.\\pipe\\test-pipe-duplicate".to_string();
-
-        start_listener(&named_pipe).unwrap();
-        let _pipe_server = NamedPipe::new(named_pipe.clone()).unwrap();
-        start_listener(&named_pipe).expect_err("address already exists");
-    }
 }
